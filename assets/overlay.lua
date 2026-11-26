@@ -211,9 +211,23 @@ local function vol_from_x(b, x)
     set_volume((x - b.x) / b.w * 2)
 end
 
+-- O mpv move a janela quando você clica e arrasta no vídeo ("window-dragging"). Isso é útil no vídeo
+-- normal, mas atrapalha no painel (arrastar o volume levava a janela junto) e com zoom (o arraste
+-- serve para mover a imagem). Liga/desliga conforme onde o mouse está, ANTES do clique acontecer.
+local win_drag = true
+local function update_window_dragging()
+    local zoomed = mp.get_property_number("video-zoom", 0) > 0
+    local want = not (drag ~= nil or zoomed or over_panel(mouse.x, mouse.y))
+    if want ~= win_drag then
+        win_drag = want
+        mp.set_property_bool("window-dragging", want)
+    end
+end
+
 local function refresh()
     local show = (mp.get_time() - last_move < 2.5) or (mouse.hover and over_panel(mouse.x, mouse.y)) or drag ~= nil
     render(show)
+    update_window_dragging()
 end
 
 mp.observe_property("mouse-pos", "native", function(_, m)
