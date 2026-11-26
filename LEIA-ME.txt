@@ -4,15 +4,24 @@ GAMESTREAM - como usar
 Abra o gamestream.exe com dois cliques. Tem duas abas:
 
 TRANSMITIR
-  1. Escolha "Monitor inteiro" (e qual monitor) ou "Só uma janela / jogo".
-  2. Qualidade: "Automático" (recomendado) ou "Fixo". Veja o guia abaixo.
-  3. Coloque uma senha.
-  4. Clique em "Iniciar transmissão" e depois em "Copiar convite".
-  5. Mande o convite (GS-...) e a senha para os amigos por DM.
+  1. Escolha "Monitor inteiro" (e qual monitor) ou "Só a janela do jogo".
+     "Ver minha transmissão" abre uma prévia sem som (como no Discord).
+  2. Áudio: escolha de onde capturar o som (ex.: fone Realtek, monitor...).
+  3. Qualidade: "Automático" (recomendado) ou "Fixo". Veja o guia abaixo.
+  4. Coloque uma senha e clique em "Iniciar transmissão".
+  5. O convite (GS-...) já vai para a área de transferência: é só dar
+     Ctrl+V no Discord. Mande a senha separada.
 
 ASSISTIR
-  1. Cole o convite GS-... e a senha.
-  2. Clique em "Conectar". O vídeo abre numa janela separada (F = tela cheia).
+  1. Cole o convite GS-... e a senha. Escolha onde tocar o som.
+  2. Clique em "Conectar". O vídeo abre numa janela separada.
+  3. Dentro da janela do vídeo:
+       - Mexa o mouse: aparece o painel no canto inferior direito
+         (mutar, volume, zoom, tela cheia).
+       - Scroll: zoom onde o mouse aponta (cima aproxima, baixo volta).
+       - Arrastar: move a imagem quando tem zoom.
+       - Clique do meio: volta ao normal.   Duplo clique / F: tela cheia.
+       - M = mutar, 9 / 0 = baixar / aumentar volume.
 
 ------------------------------------------------------------
 GUIA DE BITRATE (qualidade x internet)

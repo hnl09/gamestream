@@ -45,6 +45,9 @@ enum Cmd {
         encoder: String,
         #[arg(long)]
         no_audio: bool,
+        /// Nome do dispositivo de áudio a capturar (saída ou entrada; veja `gamestream sources`)
+        #[arg(long)]
+        audio_device: Option<String>,
         #[arg(long)]
         no_upnp: bool,
         #[arg(long)]
@@ -60,6 +63,9 @@ enum Cmd {
         password: Option<String>,
         #[arg(long)]
         mpv: Option<String>,
+        /// Saída de áudio onde tocar o som (padrão do Windows se omitido)
+        #[arg(long)]
+        audio_out: Option<String>,
     },
     /// Lista monitores e janelas que podem ser transmitidos
     Sources,
@@ -101,9 +107,24 @@ fn cli() -> Result<()> {
             for w in sources::windows() {
                 println!("  {}", w.title);
             }
+            println!("Saídas de áudio:");
+            for d in audio::output_devices() {
+                println!("  {d}");
+            }
+            println!("Entradas de áudio:");
+            for d in audio::input_devices() {
+                println!("  {d}");
+            }
             Ok(())
         }
-        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, no_upnp, password, ffmpeg } => {
+        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio_device, no_upnp, password, ffmpeg } => {
+            let audio_device = match audio_device {
+                None => audio::AudioSel::DefaultOutput,
+                Some(n) if audio::input_devices().contains(&n) && !audio::output_devices().contains(&n) => {
+                    audio::AudioSel::Input(n)
+                }
+                Some(n) => audio::AudioSel::Output(n),
+            };
             let source = match window {
                 Some(t) => {
                     let w = sources::find_window(&t).with_context(|| format!("nenhuma janela com \"{t}\" no título"))?;
@@ -119,6 +140,7 @@ fn cli() -> Result<()> {
                 fps,
                 encoder,
                 audio: !no_audio,
+                audio_device,
                 password,
                 upnp: !no_upnp,
                 ffmpeg,
@@ -129,8 +151,9 @@ fn cli() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::View { invite, password, mpv } => {
-            if rt.block_on(viewer::run(viewer::ViewOpts { invite, password, mpv }, ctrl_c)).is_err() {
+        Cmd::View { invite, password, mpv, audio_out } => {
+            let opts = viewer::ViewOpts { invite, password, mpv, audio_device: audio_out };
+            if rt.block_on(viewer::run(opts, ctrl_c)).is_err() {
                 std::process::exit(1);
             }
             Ok(())

@@ -1,8 +1,8 @@
-[package]
+﻿[package]
 name = "gamestream"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Stream de jogos com baixa latência: host (captura + encoder HEVC na GPU) e viewer nativo, via QUIC"
+description = "Stream de jogos com baixa latÃªncia: host (captura + encoder HEVC na GPU) e viewer nativo, via QUIC"
 
 [dependencies]
 anyhow = "1"
@@ -16,6 +16,7 @@ igd-next = { version = "0.15", features = ["aio_tokio"] }
 quinn = "0.11"
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde_json = "1"
 sha2 = "0.10"
 socket2 = "0.5"
 tokio = { version = "1", features = ["full"] }

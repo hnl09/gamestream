@@ -4,10 +4,76 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc, Arc, Mutex,
     },
 };
+
+/// Volume do viewer (f32 em bits; 1.0 = 100%) e mudo — alterados pela interface em tempo real.
+static VOLUME: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+static MUTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_volume(v: f32) {
+    VOLUME.store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+}
+
+pub fn set_muted(m: bool) {
+    MUTED.store(m, Ordering::Relaxed);
+}
+
+fn gain() -> f32 {
+    if MUTED.load(Ordering::Relaxed) {
+        0.0
+    } else {
+        f32::from_bits(VOLUME.load(Ordering::Relaxed))
+    }
+}
+
+/// De onde o host captura o áudio.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AudioSel {
+    /// O que toca na saída padrão do Windows (loopback).
+    DefaultOutput,
+    /// Loopback de uma saída específica (fone, caixa, monitor HDMI...).
+    Output(String),
+    /// Uma entrada (microfone, mixagem estéreo, placa de captura...).
+    Input(String),
+}
+
+impl AudioSel {
+    pub fn label(&self) -> String {
+        match self {
+            AudioSel::DefaultOutput => "Padrão do Windows (o que você está ouvindo)".into(),
+            AudioSel::Output(n) => format!("🔊 {n}"),
+            AudioSel::Input(n) => format!("🎤 {n}"),
+        }
+    }
+}
+
+pub fn output_devices() -> Vec<String> {
+    cpal::default_host()
+        .output_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+pub fn input_devices() -> Vec<String> {
+    cpal::default_host()
+        .input_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+fn find_output(name: Option<&str>) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    if let Some(n) = name {
+        if let Some(d) = host.output_devices()?.find(|d| d.name().ok().as_deref() == Some(n)) {
+            return Ok(d);
+        }
+        crate::state::log(format!("[áudio] \"{n}\" não encontrado; usando o dispositivo padrão"));
+    }
+    host.default_output_device().context("nenhum dispositivo de saída de áudio")
+}
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -52,12 +118,28 @@ fn spawn_stream(
 }
 
 /// Começa a capturar o áudio do sistema. Cada pacote enviado já vem enquadrado (`[u32 len][pcm]`).
-pub fn start_capture(tx: broadcast::Sender<Bytes>) -> Result<(AudioHandle, u32, u16)> {
+pub fn start_capture(tx: broadcast::Sender<Bytes>, sel: AudioSel) -> Result<(AudioHandle, u32, u16)> {
     spawn_stream(move || {
-        let dev = cpal::default_host()
-            .default_output_device()
-            .context("nenhum dispositivo de saída de áudio")?;
-        let cfg = dev.default_output_config()?;
+        let (dev, cfg) = match &sel {
+            AudioSel::DefaultOutput => {
+                let d = find_output(None)?;
+                let c = d.default_output_config()?;
+                (d, c)
+            }
+            AudioSel::Output(n) => {
+                let d = find_output(Some(n))?;
+                let c = d.default_output_config()?;
+                (d, c)
+            }
+            AudioSel::Input(n) => {
+                let d = cpal::default_host()
+                    .input_devices()?
+                    .find(|d| d.name().ok().as_deref() == Some(n.as_str()))
+                    .with_context(|| format!("entrada de áudio \"{n}\" não encontrada"))?;
+                let c = d.default_input_config()?;
+                (d, c)
+            }
+        };
         let (rate, ch) = (cfg.sample_rate().0, cfg.channels());
         let scfg: cpal::StreamConfig = cfg.clone().into();
         // Em WASAPI, abrir um stream de ENTRADA num dispositivo de SAÍDA = loopback.
@@ -103,13 +185,11 @@ pub struct Player {
     _handle: AudioHandle,
 }
 
-pub fn start_player(in_rate: u32, in_ch: u16) -> Result<Player> {
+pub fn start_player(in_rate: u32, in_ch: u16, device: Option<String>) -> Result<Player> {
     let queue = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(48_000)));
     let q = queue.clone();
     let (handle, out_rate, out_ch) = spawn_stream(move || {
-        let dev = cpal::default_host()
-            .default_output_device()
-            .context("nenhum dispositivo de saída de áudio")?;
+        let dev = find_output(device.as_deref())?;
         let cfg = dev.default_output_config()?;
         let (rate, ch) = (cfg.sample_rate().0, cfg.channels());
         let scfg: cpal::StreamConfig = cfg.clone().into();
@@ -176,9 +256,10 @@ where
                 return;
             }
             priming = false;
+            let g = gain();
             for s in out.iter_mut() {
                 *s = match q.pop_front() {
-                    Some(v) => <T as FromSample<f32>>::from_sample_(v),
+                    Some(v) => <T as FromSample<f32>>::from_sample_((v * g).clamp(-1.0, 1.0)),
                     None => {
                         priming = true;
                         T::EQUILIBRIUM

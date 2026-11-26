@@ -14,16 +14,52 @@ pub struct HostStatus {
     pub invite: Option<String>,
     /// Linhas descrevendo por onde os amigos conseguem chegar (LAN, IPv6, UPnP...).
     pub reach: Vec<String>,
+    /// Último erro (mostrado em destaque na interface).
+    pub error: Option<String>,
+    /// A janela de prévia (o host vendo a própria transmissão) está aberta.
+    pub preview_open: bool,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+pub enum ViewPhase {
+    #[default]
+    Idle,
+    Connecting,
+    Connected,
+    Error,
 }
 
 #[derive(Default, Clone)]
 pub struct ViewStatus {
+    pub phase: ViewPhase,
     pub text: String,
+    pub peer: String,
+    pub code: String,
+    pub verified: bool,
+}
+
+/// Controles do player. Podem mudar tanto pela interface quanto pelo painel dentro da janela do vídeo;
+/// o viewer mantém os dois lados sincronizados via IPC do mpv.
+#[derive(Clone, PartialEq)]
+pub struct ViewCtl {
+    /// 1.0 = 100% (0..2).
+    pub volume: f32,
+    pub muted: bool,
+    /// Incrementa a cada clique em "Tela cheia" na interface.
+    pub fullscreen_toggles: u32,
+    pub on_top: bool,
+}
+
+impl Default for ViewCtl {
+    fn default() -> Self {
+        ViewCtl { volume: 1.0, muted: false, fullscreen_toggles: 0, on_top: false }
+    }
 }
 
 pub static LOG: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 pub static HOST: LazyLock<Mutex<HostStatus>> = LazyLock::new(|| Mutex::new(HostStatus::default()));
 pub static VIEW: LazyLock<Mutex<ViewStatus>> = LazyLock::new(|| Mutex::new(ViewStatus::default()));
+pub static VIEW_CTL: LazyLock<Mutex<ViewCtl>> = LazyLock::new(|| Mutex::new(ViewCtl::default()));
 
 pub fn log(msg: impl AsRef<str>) {
     let m = msg.as_ref();
@@ -39,6 +75,13 @@ pub fn host<R>(f: impl FnOnce(&mut HostStatus) -> R) -> R {
     f(&mut HOST.lock().unwrap())
 }
 
-pub fn view_status(text: impl Into<String>) {
-    VIEW.lock().unwrap().text = text.into();
+pub fn view<R>(f: impl FnOnce(&mut ViewStatus) -> R) -> R {
+    f(&mut VIEW.lock().unwrap())
+}
+
+pub fn view_phase(phase: ViewPhase, text: impl Into<String>) {
+    view(|v| {
+        v.phase = phase;
+        v.text = text.into();
+    });
 }

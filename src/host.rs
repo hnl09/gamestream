@@ -8,7 +8,7 @@ use std::{
     net::SocketAddr,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -31,6 +31,75 @@ use crate::{
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const MIN_BITRATE: u32 = 3;
 
+/// O host quer ver a própria transmissão (prévia sem som). A interface liga/desliga a qualquer momento.
+static PREVIEW: AtomicBool = AtomicBool::new(true);
+
+pub fn set_preview(on: bool) {
+    PREVIEW.store(on, Ordering::Relaxed);
+}
+
+pub fn preview_wanted() -> bool {
+    PREVIEW.load(Ordering::Relaxed)
+}
+
+/// Mantém (ou fecha) a janela de prévia conforme `PREVIEW`. Nunca termina.
+async fn preview_loop(vtx: broadcast::Sender<VideoChunk>) {
+    loop {
+        while !preview_wanted() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if let Err(e) = run_preview(&vtx).await {
+            log(format!("[prévia] {e:#}"));
+            set_preview(false);
+        }
+        state::host(|h| h.preview_open = false);
+    }
+}
+
+/// Mostra o vídeo que sai do encoder (o mesmo que os amigos recebem) num mpv local, sem áudio.
+async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
+    let mpv = crate::viewer::find_mpv(None);
+    let mut child = Command::new(&mpv)
+        .args(crate::viewer::mpv_args("preview", "GameStream - sua transmissão (prévia, sem som)", None))
+        .stdin(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("não consegui abrir o mpv ({})", mpv.display()))?;
+    let mut stdin = child.stdin.take().unwrap();
+    let mut rx = vtx.subscribe();
+    let mut waiting_keyframe = true;
+    state::host(|h| h.preview_open = true);
+    log("[prévia] aberta (sem som).");
+    loop {
+        tokio::select! {
+            m = rx.recv() => match m {
+                Ok(c) => {
+                    let data = if waiting_keyframe {
+                        let Some(off) = c.vps else { continue };
+                        waiting_keyframe = false;
+                        c.raw.slice(off..)
+                    } else {
+                        c.raw.clone()
+                    };
+                    if tokio::io::AsyncWriteExt::write_all(&mut stdin, &data).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => waiting_keyframe = true,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = child.wait() => {
+                // O usuário fechou a janela: entende como "não quero prévia".
+                set_preview(false);
+                break;
+            }
+            _ = async { while preview_wanted() { tokio::time::sleep(Duration::from_millis(200)).await; } } => break,
+        }
+    }
+    log("[prévia] fechada.");
+    Ok(())
+}
+
 pub struct HostOpts {
     pub port: u16,
     pub source: Source,
@@ -40,6 +109,7 @@ pub struct HostOpts {
     pub fps: u32,
     pub encoder: String,
     pub audio: bool,
+    pub audio_device: audio::AudioSel,
     pub password: Option<String>,
     pub upnp: bool,
     pub ffmpeg: String,
@@ -272,10 +342,11 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
 pub async fn run(o: HostOpts, stop: impl Future<Output = ()>) -> Result<()> {
     state::host(|h| *h = state::HostStatus::default());
     let r = run_inner(o, stop).await;
-    if let Err(e) = &r {
-        log(format!("Erro: {e:#}"));
+    let error = r.as_ref().err().map(|e| format!("{e:#}"));
+    if let Some(e) = &error {
+        log(format!("Erro: {e}"));
     }
-    state::host(|h| *h = state::HostStatus::default());
+    state::host(|h| *h = state::HostStatus { error, ..Default::default() });
     log("Transmissão encerrada.");
     r
 }
@@ -317,9 +388,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let audio_fmt = if !o.audio {
         None
     } else {
-        match audio::start_capture(atx.clone()) {
+        match audio::start_capture(atx.clone(), o.audio_device.clone()) {
             Ok((h, rate, ch)) => {
-                log(format!("Áudio: capturando o som do sistema ({rate} Hz, {ch} canais)"));
+                log(format!("Áudio: {} ({rate} Hz, {ch} canais)", o.audio_device.label()));
                 _audio_handle = Some(h);
                 Some((rate, ch))
             }
@@ -404,6 +475,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let (br_tx, br_rx) = watch::channel(start_br);
 
     let encoder = encoder_loop(&o, &cap, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone());
+    let vtx_preview = vtx.clone();
 
     let controller = async {
         if o.auto_bitrate {
@@ -456,8 +528,11 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         }
     };
 
+    let preview = preview_loop(vtx_preview);
+
     let res = tokio::select! {
         r = encoder => r,
+        _ = preview => Ok(()),
         _ = accept => Ok(()),
         _ = stats => Ok(()),
         _ = controller => Ok(()),
