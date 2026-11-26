@@ -175,6 +175,7 @@ struct App {
     show_log: bool,
     // host
     src_kind: SrcKind,
+    last_src_kind: SrcKind,
     monitors: Vec<MonitorInfo>,
     windows: Vec<WindowInfo>,
     sel_monitor: usize,
@@ -183,6 +184,8 @@ struct App {
     in_devices: Vec<String>,
     audio: bool,
     audio_sel: AudioSel,
+    audio_apps: Vec<(u32, String)>,
+    mic: Option<String>,
     auto_bitrate: bool,
     bitrate: u32,
     fps: u32,
@@ -211,6 +214,7 @@ impl App {
             tab: Tab::Host,
             show_log: false,
             src_kind: SrcKind::Monitor,
+            last_src_kind: SrcKind::Monitor,
             monitors: vec![],
             windows: vec![],
             sel_monitor: 0,
@@ -218,7 +222,9 @@ impl App {
             out_devices: vec![],
             in_devices: vec![],
             audio: true,
-            audio_sel: AudioSel::DefaultOutput,
+            audio_sel: AudioSel::AllExceptDiscord,
+            audio_apps: vec![],
+            mic: None,
             auto_bitrate: true,
             bitrate: 20,
             fps: 60,
@@ -239,6 +245,7 @@ impl App {
             view_task: None,
         };
         a.refresh();
+        crate::updater::check_in_background();
         a
     }
 
@@ -250,6 +257,7 @@ impl App {
         }
         self.out_devices = audio::output_devices();
         self.in_devices = audio::input_devices();
+        self.audio_apps = crate::procaudio::audio_apps();
     }
 
     fn host_running(&self) -> bool {
@@ -287,6 +295,7 @@ impl App {
             encoder: self.encoder.clone(),
             audio: self.audio,
             audio_device: self.audio_sel.clone(),
+            mic: self.mic.clone(),
             password: (!self.password.is_empty()).then(|| self.password.clone()),
             upnp: self.upnp,
             ffmpeg: "ffmpeg".into(),
@@ -366,7 +375,7 @@ impl App {
                                 ui.selectable_value(&mut self.sel_window, Some((w.hwnd, w.title.clone())), &w.title);
                             }
                         });
-                    hint(ui, "Deixe o jogo visível (de preferência em janela sem bordas). O que ficar por cima dele também aparece.");
+                    hint(ui, "Captura direto do Windows: pode mover, redimensionar ou cobrir a janela que a transmissão continua. Só não minimize.");
                 }
             }
             ui.add_space(4.0);
@@ -378,31 +387,94 @@ impl App {
             );
         });
 
+        // Troca o padrão de áudio junto com a fonte: janela -> só o jogo; monitor -> tudo menos o Discord.
+        if self.src_kind != self.last_src_kind {
+            match (self.src_kind, &self.audio_sel) {
+                (SrcKind::Window, AudioSel::AllExceptDiscord) => self.audio_sel = AudioSel::GameWindow,
+                (SrcKind::Monitor, AudioSel::GameWindow) => self.audio_sel = AudioSel::AllExceptDiscord,
+                _ => {}
+            }
+            self.last_src_kind = self.src_kind;
+        }
+
         card(ui, "2. Áudio", |ui| {
             ui.checkbox(&mut self.audio, "Transmitir áudio");
             ui.add_enabled_ui(self.audio, |ui| {
-                ui.label("Capturar o som de:");
+                ui.label("O que os amigos vão ouvir:");
+                let window_mode = self.src_kind == SrcKind::Window;
                 egui::ComboBox::from_id_salt("audio_src")
                     .width(ui.available_width())
                     .selected_text(self.audio_sel.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.audio_sel, AudioSel::DefaultOutput, AudioSel::DefaultOutput.label());
+                        ui.add_enabled_ui(window_mode, |ui| {
+                            ui.selectable_value(&mut self.audio_sel, AudioSel::GameWindow, AudioSel::GameWindow.label());
+                        });
+                        ui.selectable_value(
+                            &mut self.audio_sel,
+                            AudioSel::AllExceptDiscord,
+                            AudioSel::AllExceptDiscord.label(),
+                        );
+                        if !self.audio_apps.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("Só um programa (que está tocando som agora)").small().color(MUTED_TXT));
+                            for (pid, name) in &self.audio_apps {
+                                let v = AudioSel::App { pid: *pid, name: name.clone() };
+                                let l = v.label();
+                                ui.selectable_value(&mut self.audio_sel, v, l);
+                            }
+                        }
                         ui.separator();
-                        ui.label(RichText::new("Saídas (o que toca nelas)").small().color(MUTED_TXT));
+                        ui.label(RichText::new("Tudo que toca numa saída (inclui o Discord)").small().color(MUTED_TXT));
+                        ui.selectable_value(&mut self.audio_sel, AudioSel::DefaultOutput, AudioSel::DefaultOutput.label());
                         for d in &self.out_devices {
                             let v = AudioSel::Output(d.clone());
                             let l = v.label();
                             ui.selectable_value(&mut self.audio_sel, v, l);
                         }
                         ui.separator();
-                        ui.label(RichText::new("Entradas (microfone, mixagem estéreo...)").small().color(MUTED_TXT));
+                        ui.label(RichText::new("Entradas (mixagem estéreo, placa de captura...)").small().color(MUTED_TXT));
                         for d in &self.in_devices {
                             let v = AudioSel::Input(d.clone());
                             let l = v.label();
                             ui.selectable_value(&mut self.audio_sel, v, l);
                         }
                     });
-                hint(ui, "Escolha a saída onde o jogo está tocando (ex.: fone Realtek ou o monitor). Se ninguém ouvir nada, troque aqui.");
+                match &self.audio_sel {
+                    AudioSel::GameWindow => hint(ui, "Só o som do jogo: Discord, navegador e notificações ficam de fora."),
+                    AudioSel::AllExceptDiscord => hint(
+                        ui,
+                        "Tudo que toca no PC, menos o Discord: quem está na call não ouve a própria voz de volta.",
+                    ),
+                    AudioSel::App { .. } => hint(ui, "Só o som desse programa. Se não aparecer, abra o jogo e clique em ⟳."),
+                    AudioSel::DefaultOutput | AudioSel::Output(_) => {
+                        ui.label(
+                            RichText::new("⚠ Inclui o Discord: se vocês estiverem em call, os amigos vão ouvir as próprias vozes de volta.")
+                                .small()
+                                .color(Color32::from_rgb(255, 190, 90)),
+                        );
+                    }
+                    AudioSel::Input(_) => hint(ui, "Captura uma entrada de áudio."),
+                }
+
+                ui.add_space(6.0);
+                let mut mic_on = self.mic.is_some();
+                if ui.checkbox(&mut mic_on, "🎤 Incluir meu microfone").changed() {
+                    self.mic = if mic_on { audio::default_input().or_else(|| self.in_devices.first().cloned()) } else { None };
+                }
+                if let Some(cur) = self.mic.clone() {
+                    egui::ComboBox::from_id_salt("mic_dev").width(ui.available_width()).selected_text(&cur).show_ui(ui, |ui| {
+                        for d in &self.in_devices {
+                            ui.selectable_value(&mut self.mic, Some(d.clone()), d);
+                        }
+                    });
+                    ui.label(
+                        RichText::new("⚠ Se vocês estiverem conversando no Discord, deixe DESLIGADO: os amigos ouviriam sua voz duas vezes (pelo Discord e pela transmissão).")
+                            .small()
+                            .color(Color32::from_rgb(255, 190, 90)),
+                    );
+                } else {
+                    hint(ui, "Desligado (recomendado se vocês já estão em call no Discord).");
+                }
             });
         });
 
@@ -465,7 +537,12 @@ impl App {
                     ui.spinner();
                     ui.label(RichText::new("Preparando a transmissão...").size(17.0).strong());
                 });
-                hint(ui, "Detectando o encoder da placa de vídeo e abrindo a conexão. Leva alguns segundos.");
+                if let Some(p) = *crate::updater::FFMPEG_PROGRESS.lock().unwrap() {
+                    ui.label("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Só na primeira vez.");
+                    ui.add(egui::ProgressBar::new(p).show_percentage());
+                } else {
+                    hint(ui, "Detectando o encoder da placa de vídeo e abrindo a conexão. Leva alguns segundos.");
+                }
             });
         } else {
             card(ui, "", |ui| {
@@ -591,6 +668,22 @@ impl App {
                     RichText::new(format!("⚠ Criptografado, mas identidade NÃO verificada (conectou por IP) · código {}", vs.code))
                         .color(Color32::from_rgb(255, 190, 90)),
                 );
+            }
+            ui.add_space(6.0);
+            let s = &vs.stats;
+            let warn = Color32::from_rgb(255, 190, 90);
+            ui.columns(4, |c| {
+                stat(&mut c[0], "Ping", format!("{} ms", s.ping_ms));
+                stat(&mut c[1], "FPS", s.fps.to_string());
+                c[2].vertical(|ui| {
+                    ui.label(RichText::new("Perda de pacotes").small().color(MUTED_TXT));
+                    let col = if s.loss >= 2.0 { warn } else { Color32::WHITE };
+                    ui.label(RichText::new(format!("{:.1}%", s.loss)).size(20.0).strong().color(col));
+                });
+                stat(&mut c[3], "Recebendo", format!("{:.1} Mbps", s.mbps));
+            });
+            if s.loss >= 2.0 {
+                hint(ui, "Perda alta: sua internet (ou o Wi-Fi) não está dando conta. Se o host usa bitrate automático, ele vai baixar sozinho.");
             }
         });
 
@@ -796,6 +889,28 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.tab, Tab::View, RichText::new("  Assistir  ").size(16.0));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.toggle_value(&mut self.show_log, "Log");
+                        let upd = crate::updater::UPDATE.lock().unwrap().clone();
+                        match upd {
+                            crate::updater::UpdateState::Available(rel) => {
+                                let b = egui::Button::new(
+                                    RichText::new(format!("⬆ Atualizar para {}", rel.tag)).color(Color32::WHITE).strong(),
+                                )
+                                .fill(OK);
+                                if ui.add(b).on_hover_text("Baixa a versão nova e reinicia o GameStream").clicked() {
+                                    crate::updater::apply(rel);
+                                }
+                            }
+                            crate::updater::UpdateState::Downloading(tag, p) => {
+                                ui.label(RichText::new(format!("Baixando {tag}... {:.0}%", p * 100.0)).small().color(MUTED_TXT));
+                            }
+                            crate::updater::UpdateState::Error(e) => {
+                                ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(MUTED_TXT))
+                                    .on_hover_text(format!("Não foi possível verificar atualizações: {e}"));
+                            }
+                            _ => {
+                                ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(MUTED_TXT));
+                            }
+                        }
                         if host_live {
                             pill(ui, "AO VIVO", LIVE);
                         } else if view_live {

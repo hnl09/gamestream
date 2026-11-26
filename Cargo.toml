@@ -1,6 +1,6 @@
 [package]
 name = "gamestream"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Stream de jogos com baixa latência: host (captura + encoder HEVC na GPU) e viewer nativo, via QUIC"
 
@@ -11,6 +11,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 cpal = "0.15"
 eframe = "0.29"
+flate2 = "1"
 if-addrs = "0.13"
 igd-next = { version = "0.15", features = ["aio_tokio"] }
 quinn = "0.11"
@@ -20,16 +21,28 @@ serde_json = "1"
 sha2 = "0.10"
 socket2 = "0.5"
 tokio = { version = "1", features = ["full"] }
+ureq = "2"
 windows = { version = "0.58", features = [
+    "implement",
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_HiDpi",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+windows-core = "0.58"
+
 
 [profile.release]
 opt-level = 3

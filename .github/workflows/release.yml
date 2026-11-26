@@ -30,23 +30,41 @@ jobs:
           Expand-Archive deps\ffmpeg.zip deps\ffmpeg
           Invoke-WebRequest "https://github.com/mpv-player/mpv/releases/download/v0.42.0/mpv-v0.42.0-x86_64-pc-windows-msvc.zip" -OutFile deps\mpv.zip
           Expand-Archive deps\mpv.zip deps\mpv
+          $ff = (Get-ChildItem deps\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName
+          if (-not (& $ff -hide_banner -h filter=gfxcapture | Select-String "gfxcapture AVOptions")) {
+            Write-Warning "Este FFmpeg não tem gfxcapture: a captura de janela vai usar o modo antigo (recorte)."
+          }
 
       - name: Empacotar
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory dist | Out-Null
+          New-Item -ItemType Directory dist, out | Out-Null
+
+          # Pacote principal (para todo mundo): app + player. Sem o FFmpeg.
           Copy-Item target\release\gamestream.exe dist\
-          Copy-Item (Get-ChildItem deps\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName dist\
           $mpv = (Get-ChildItem deps\mpv -Recurse -Filter mpv.exe | Select-Object -First 1).DirectoryName
           Copy-Item "$mpv\mpv.exe" dist\
           Get-ChildItem $mpv -Filter *.dll | Copy-Item -Destination dist\
           Copy-Item LEIA-ME.txt, THIRD-PARTY.txt dist\
-          Compress-Archive dist\* GameStream.zip
+          Compress-Archive dist\* out\GameStream.zip
+
+          # Para a atualização automática.
+          Copy-Item target\release\gamestream.exe out\
+          (Get-FileHash out\gamestream.exe -Algorithm SHA256).Hash.ToLower() | Out-File -NoNewline -Encoding ascii out\gamestream.exe.sha256
+
+          # FFmpeg comprimido: o app baixa sozinho na primeira transmissão.
+          $ff = (Get-ChildItem deps\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName
+          $in = [IO.File]::OpenRead($ff); $o = [IO.File]::Create("out\ffmpeg.exe.gz")
+          $gz = New-Object IO.Compression.GZipStream($o, [IO.Compression.CompressionLevel]::Optimal)
+          $in.CopyTo($gz); $gz.Dispose(); $in.Dispose(); $o.Dispose()
+          (Get-FileHash out\ffmpeg.exe.gz -Algorithm SHA256).Hash.ToLower() | Out-File -NoNewline -Encoding ascii out\ffmpeg.exe.gz.sha256
+
+          Get-ChildItem out | ForEach-Object { "{0,-26} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) }
 
       - name: Publicar release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: GameStream.zip
+          files: out/*
           generate_release_notes: true

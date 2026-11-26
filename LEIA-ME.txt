@@ -5,10 +5,20 @@ Abra o gamestream.exe com dois cliques. Tem duas abas:
 
 TRANSMITIR
   1. Escolha "Monitor inteiro" (e qual monitor) ou "Só a janela do jogo".
+     A janela é capturada direto pelo Windows: pode mover, redimensionar
+     ou deixar outra janela por cima que a transmissão continua igual.
      "Ver minha transmissão" abre uma prévia sem som (como no Discord).
-  2. Áudio: escolha de onde capturar o som (ex.: fone Realtek, monitor...).
+  2. Áudio - o que os amigos vão ouvir:
+       - Só o som do jogo (modo janela): Discord, navegador e notificações
+         ficam de fora.
+       - Tudo do PC, menos o Discord (modo monitor): quem está na call não
+         ouve a própria voz de volta.
+       - Só um programa, ou tudo de uma saída (esta inclui o Discord).
+     Microfone: deixe DESLIGADO se vocês estiverem conversando no Discord
+     (senão os amigos ouvem sua voz duas vezes).
   3. Qualidade: "Automático" (recomendado) ou "Fixo". Veja o guia abaixo.
   4. Coloque uma senha e clique em "Iniciar transmissão".
+     Na primeira vez o app baixa o encoder de vídeo (FFmpeg, ~90 MB).
   5. O convite (GS-...) já vai para a área de transferência: é só dar
      Ctrl+V no Discord. Mande a senha separada.
 
@@ -22,6 +32,15 @@ ASSISTIR
        - Arrastar: move a imagem quando tem zoom.
        - Clique do meio: volta ao normal.   Duplo clique / F: tela cheia.
        - M = mutar, 9 / 0 = baixar / aumentar volume.
+       - Acima do painel: ping, FPS, perda de pacotes e Mbps.
+         I (ou o botão "i") deixa esses números fixos no canto.
+     Com captura de janela, o FPS cai quando a janela fica parada (o Windows
+     só manda imagem nova quando algo muda); em jogo ele fica normal.
+
+ATUALIZAÇÕES
+  Quando sair uma versão nova, aparece o botão "Atualizar" no topo do app.
+  Um clique baixa, confere (SHA-256) e reinicia. Pelo terminal:
+  gamestream update
 
 ------------------------------------------------------------
 GUIA DE BITRATE (qualidade x internet)
@@ -81,14 +100,15 @@ SEGURANÇA
 
 ------------------------------------------------------------
 ARQUIVOS
-------------------------------------------------------------
-- Para assistir: gamestream.exe + mpv.exe + vulkan-1.dll
-- Para transmitir: também o ffmpeg.exe
+- gamestream.exe + mpv.exe + vulkan-1.dll (é o que vem no zip).
+- ffmpeg.exe: baixado sozinho na primeira transmissão (só quem transmite precisa).
 - Placa AMD, NVIDIA ou Intel: o encoder é escolhido sozinho.
 
 LINHA DE COMANDO (opcional)
   gamestream sources
   gamestream host --auto --bitrate 25 --password minhasenha
-  gamestream host --window "Elden Ring" --bitrate 15
+  gamestream host --window "Elden Ring" --bitrate 15 --audio game
+  gamestream host --audio no-discord --mic "Fifine Mic (fifine Microphone)"
+  gamestream audio-test --audio no-discord      (mede o som capturado)
   gamestream host --monitor 2 --fps 120
   gamestream view GS-xxxx --password minhasenha

@@ -7,7 +7,10 @@ use std::{
     future::Future,
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -180,6 +183,11 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let audio_device = o.audio_device;
     let control = mpv_control(&pipe);
     tokio::pin!(control);
+    let frames = Arc::new(AtomicU64::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let (mut last_frames, mut last_bytes, mut last_t) = (0u64, 0u64, std::time::Instant::now());
     let result = loop {
         tokio::select! {
             st = conn.accept_uni() => {
@@ -195,10 +203,34 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                 match kind[0] {
                     net::STREAM_VIDEO => {
                         let Some(mut pipe_in) = stdin.take() else { bail!("host mandou dois streams de vídeo") };
+                        let (frames, bytes) = (frames.clone(), bytes.clone());
                         tasks.spawn(async move {
                             let mut buf = Vec::new();
                             while net::read_msg(&mut st, &mut buf).await? {
+                                frames.fetch_add(count_frames(&buf), Ordering::Relaxed);
+                                bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
                                 pipe_in.write_all(&buf).await?;
+                            }
+                            anyhow::Ok(())
+                        });
+                    }
+                    net::STREAM_STATS => {
+                        tasks.spawn(async move {
+                            let mut lines = tokio::io::BufReader::new(st).lines();
+                            while let Some(l) = lines.next_line().await? {
+                                let mut loss = None;
+                                let mut target = None;
+                                for kv in l.split(';') {
+                                    match kv.split_once('=') {
+                                        Some(("loss", v)) => loss = v.parse::<f64>().ok(),
+                                        Some(("target", v)) => target = v.parse::<u32>().ok(),
+                                        _ => {}
+                                    }
+                                }
+                                state::view(|v| {
+                                    if let Some(x) = loss { v.stats.loss = x; }
+                                    if let Some(x) = target { v.stats.target = x; }
+                                });
                             }
                             anyhow::Ok(())
                         });
@@ -232,11 +264,40 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
             }
             _ = child.wait() => { log("Player fechado."); break Ok(()); }
             _ = &mut control => {}
+            _ = tick.tick() => {
+                let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
+                let dt = last_t.elapsed().as_secs_f64().max(0.2);
+                let ping = conn.stats().path.rtt.as_millis() as u32;
+                state::view(|v| {
+                    v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;
+                    v.stats.mbps = (b - last_bytes) as f64 * 8.0 / 1e6 / dt;
+                    v.stats.ping_ms = ping;
+                });
+                (last_frames, last_bytes, last_t) = (f, b, std::time::Instant::now());
+            }
         }
     };
     conn.close(0u32.into(), b"tchau");
     let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
     result
+}
+
+/// Conta frames num pedaço de HEVC: cada NAL de vídeo com first_slice_segment_in_pic_flag começa um frame.
+fn count_frames(b: &[u8]) -> u64 {
+    let mut n = 0;
+    let mut i = 0;
+    while i + 5 < b.len() {
+        if b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1 {
+            let t = (b[i + 3] >> 1) & 0x3f;
+            if t < 32 && b[i + 5] & 0x80 != 0 {
+                n += 1;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    n
 }
 
 /// Sincroniza volume/mudo/janela entre o app e o painel dentro do mpv (IPC, JSON por linha).
@@ -305,7 +366,20 @@ async fn mpv_control(pipe: &str) {
     }
 
     // Escritor: mudanças feitas no app → mpv.
+    let mut last_stats = String::new();
     loop {
+        let line = state::VIEW.lock().unwrap().stats.line();
+        if line != last_stats {
+            let cmd = format!(
+                r#"{{"command":["set_property","user-data/gs/stats",{}]}}"#,
+                serde_json::to_string(&line).unwrap_or_default()
+            );
+            if wr.write_all(format!("{cmd}
+").as_bytes()).await.is_err() {
+                return std::future::pending().await;
+            }
+            last_stats = line;
+        }
         let c = state::VIEW_CTL.lock().unwrap().clone();
         let prev = synced.lock().unwrap().clone();
         if prev.as_ref() != Some(&c) {

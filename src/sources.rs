@@ -51,6 +51,17 @@ pub struct Capture {
     pub output_idx: u32,
     /// (offset_x, offset_y, largura, altura) dentro do monitor.
     pub crop: Option<(i32, i32, i32, i32)>,
+    /// Captura nativa da janela (Windows Graphics Capture): segue a janela e funciona mesmo coberta.
+    pub hwnd: Option<isize>,
+}
+
+/// Processo dono da janela (para capturar só o som dele).
+pub fn window_pid(hwnd: isize) -> Option<u32> {
+    let mut pid = 0u32;
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(HWND(hwnd as *mut c_void), Some(&mut pid));
+    }
+    (pid != 0).then_some(pid)
 }
 
 /// Monitores do adaptador principal, na mesma ordem que o ddagrab (`output_idx`).
@@ -113,7 +124,7 @@ pub fn windows() -> Vec<WindowInfo> {
 
 pub fn resolve(src: &Source) -> Result<Capture> {
     match src {
-        Source::Monitor(i) => Ok(Capture { output_idx: *i, crop: None }),
+        Source::Monitor(i) => Ok(Capture { output_idx: *i, crop: None, hwnd: None }),
         Source::Window { hwnd, title } => unsafe {
             let h = HWND(*hwnd as *mut c_void);
             if !IsWindow(h).as_bool() {
@@ -140,7 +151,7 @@ pub fn resolve(src: &Source) -> Result<Capture> {
             if cw < 64 || ch < 64 {
                 bail!("a janela \"{title}\" é pequena demais");
             }
-            Ok(Capture { output_idx: m.idx, crop: Some((ox, oy, cw, ch)) })
+            Ok(Capture { output_idx: m.idx, crop: Some((ox, oy, cw, ch)), hwnd: None })
         },
     }
 }

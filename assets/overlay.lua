@@ -3,6 +3,7 @@
 --   * Arrastar com o botão esquerdo (com zoom): move a imagem.
 --   * Clique do meio / Backspace: volta ao tamanho normal.
 --   * Duplo clique / F: tela cheia.
+--   * I: fixa as estatísticas (ping, FPS, perda, Mbps) no canto da tela.
 --   * Painel no canto inferior direito (aparece ao mexer o mouse): som, volume, zoom, tela cheia.
 -- O volume é guardado em user-data/gs/* e o GameStream (que toca o áudio) acompanha pela IPC.
 
@@ -18,6 +19,12 @@ local drag = nil -- { kind = "pan"|"vol", ... }
 
 local volume = 1.0
 local muted = false
+local stats = ""      -- "Ping 12 ms · 60 FPS · Perda 0.0% · 11.8 Mbps" (vem do GameStream)
+local pinned = false  -- estatísticas fixas no canto (tecla I)
+
+mp.observe_property("user-data/gs/stats", "native", function(_, v)
+    if type(v) == "string" then stats = v end
+end)
 
 if has_audio then
     mp.set_property_native("user-data/gs/volume", volume)
@@ -115,13 +122,21 @@ end
 
 local function render(show)
     local d = dims()
-    if not d or not show then
+    if not d or (not show and not (pinned and stats ~= "")) then
         overlay.data = ""
         overlay:update()
         buttons = {}
         return
     end
     overlay.res_x, overlay.res_y = d.w, d.h
+    if not show then
+        -- Só as estatísticas fixas no canto superior esquerdo.
+        buttons = {}
+        local tw = math.floor(stats:len() * 8.2) + 24
+        overlay.data = rect(12, 12, tw, 34, C_BG, 0x40) .. "\n" .. text(24, 29, stats, 16, C_TXT, 4)
+        overlay:update()
+        return
+    end
     local H, pad, gap = 40, 10, 8
     local items = {}
     if has_audio then
@@ -134,6 +149,9 @@ local function render(show)
     items[#items + 1] = { id = "zin", w = 34, label = "+" }
     items[#items + 1] = { id = "zreset", w = 44, label = "1:1" }
     items[#items + 1] = { id = "fs", w = 96, label = mp.get_property_native("fullscreen") and "Sair" or "Tela cheia" }
+    if stats ~= "" then
+        items[#items + 1] = { id = "info", w = 34, label = "i" }
+    end
 
     local total = pad * 2
     for i, it in ipairs(items) do total = total + it.w + (i > 1 and gap or 0) end
@@ -158,14 +176,19 @@ local function render(show)
         elseif it.id == "ztxt" then
             ass[#ass + 1] = text(x + it.w / 2, y0 + H / 2, zpct .. "%", 17, zpct > 100 and C_ACCENT or C_DIM)
         else
-            local active = (it.id == "mute" and muted)
+            local active = (it.id == "mute" and muted) or (it.id == "info" and pinned)
             ass[#ass + 1] = rect(x, y0, it.w, H, active and C_ACCENT or (hov and C_BTN_HOV or C_BTN))
-            ass[#ass + 1] = text(x + it.w / 2, y0 + H / 2, it.label, it.label:len() > 3 and 17 or 24, C_TXT)
+            ass[#ass + 1] = text(x + it.w / 2, y0 + H / 2, it.label, (it.label:len() > 3 or it.id == "info") and 17 or 24, C_TXT)
         end
         x = x + it.w + gap
     end
+    local above = y0 - pad - 14
+    if stats ~= "" then
+        ass[#ass + 1] = text(x0 + total, above, stats, 16, C_TXT, 6)
+        above = above - 22
+    end
     if zpct > 100 then
-        ass[#ass + 1] = text(x0 + total, y0 - pad - 14, "Arraste para mover  ·  clique do meio volta ao normal", 15, C_DIM, 6)
+        ass[#ass + 1] = text(x0 + total, above, "Arraste para mover  ·  clique do meio volta ao normal", 15, C_DIM, 6)
     end
     overlay.data = table.concat(ass, "\n")
     overlay:update()
@@ -231,6 +254,7 @@ local function on_click(e)
         elseif b.id == "zout" then zoom_step(-1)
         elseif b.id == "zreset" then reset_zoom()
         elseif b.id == "fs" then mp.commandv("cycle", "fullscreen")
+        elseif b.id == "info" then pinned = not pinned
         end
         refresh()
         return
@@ -267,6 +291,7 @@ mp.add_forced_key_binding("WHEEL_DOWN", "gs_wheel_down", wheel(-1), { repeatable
 mp.add_forced_key_binding("MBTN_MID", "gs_reset", function() reset_zoom(); refresh() end)
 mp.add_forced_key_binding("BS", "gs_reset_key", function() reset_zoom(); refresh() end)
 mp.add_forced_key_binding("f", "gs_fs", function() mp.commandv("cycle", "fullscreen") end)
+mp.add_forced_key_binding("i", "gs_info", function() pinned = not pinned; refresh() end)
 if has_audio then
     mp.add_forced_key_binding("m", "gs_mute", function() toggle_mute(); last_move = mp.get_time(); refresh() end)
     mp.add_forced_key_binding("9", "gs_vol_down", function() set_volume(volume - 0.05); last_move = mp.get_time(); refresh() end, { repeatable = true })

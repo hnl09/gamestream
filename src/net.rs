@@ -18,6 +18,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 pub const DEFAULT_PORT: u16 = 9000;
 pub const STREAM_VIDEO: u8 = 1;
 pub const STREAM_AUDIO: u8 = 2;
+/// Estatísticas que o host mede para cada viewer (perda de pacotes, bitrate alvo), 1 linha por segundo.
+pub const STREAM_STATS: u8 = 3;
 
 pub struct Identity {
     cert: Vec<u8>,

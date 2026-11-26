@@ -36,6 +36,29 @@ pub struct ViewStatus {
     pub peer: String,
     pub code: String,
     pub verified: bool,
+    pub stats: ViewStats,
+}
+
+/// Números da transmissão para quem assiste (atualizados a cada segundo).
+#[derive(Default, Clone, PartialEq)]
+pub struct ViewStats {
+    pub ping_ms: u32,
+    pub fps: u32,
+    /// Perda de pacotes medida pelo host (%).
+    pub loss: f64,
+    /// Mbps chegando.
+    pub mbps: f64,
+    /// Bitrate alvo do host.
+    pub target: u32,
+}
+
+impl ViewStats {
+    pub fn line(&self) -> String {
+        format!(
+            "Ping {} ms  ·  {} FPS  ·  Perda {:.1}%  ·  {:.1} Mbps",
+            self.ping_ms, self.fps, self.loss, self.mbps
+        )
+    }
 }
 
 /// Controles do player. Podem mudar tanto pela interface quanto pelo painel dentro da janela do vídeo;

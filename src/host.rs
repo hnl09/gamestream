@@ -110,6 +110,8 @@ pub struct HostOpts {
     pub encoder: String,
     pub audio: bool,
     pub audio_device: audio::AudioSel,
+    /// Microfone misturado ao áudio (None = desligado).
+    pub mic: Option<String>,
     pub password: Option<String>,
     pub upnp: bool,
     pub ffmpeg: String,
@@ -152,10 +154,19 @@ type Viewers = Arc<Mutex<HashMap<SocketAddr, Viewer>>>;
 fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u32, test: bool) -> Vec<String> {
     let br = format!("{bitrate}M");
     let buf = format!("{}k", bitrate * 1000 / 2);
-    let mut graph = format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", cap.output_idx, o.fps);
-    if let Some((x, y, w, h)) = cap.crop {
-        graph.push_str(&format!(":offset_x={x}:offset_y={y}:video_size={w}x{h}"));
-    }
+    let mut graph = if let Some(h) = cap.hwnd {
+        // Captura nativa da janela: segue a janela, funciona coberta, e escala se ela mudar de tamanho.
+        format!(
+            "gfxcapture=hwnd={h}:max_framerate={}:resize_mode=scale_aspect:width=-2:height=-2:capture_cursor=1",
+            o.fps
+        )
+    } else {
+        let mut g = format!("ddagrab=output_idx={}:framerate={}:draw_mouse=1", cap.output_idx, o.fps);
+        if let Some((x, y, w, h)) = cap.crop {
+            g.push_str(&format!(":offset_x={x}:offset_y={y}:video_size={w}x{h}"));
+        }
+        g
+    };
     if cpu_copy {
         graph.push_str(if enc == Enc::Qsv { ",hwdownload,format=bgra,format=nv12" } else { ",hwdownload,format=bgra" });
     }
@@ -166,15 +177,15 @@ fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u
     let enc_args: &[&str] = match enc {
         Enc::Amf => &[
             "-c:v", "hevc_amf", "-usage", "ultralowlatency", "-latency", "1", "-async_depth", "1",
-            "-rc", "cbr", "-header_insertion_mode", "idr",
+            "-rc", "cbr", "-header_insertion_mode", "idr", "-forced_idr", "1",
         ],
         Enc::Nvenc => &[
             "-c:v", "hevc_nvenc", "-preset", "p1", "-tune", "ull", "-rc", "cbr", "-zerolatency", "1",
-            "-delay", "0", "-bf", "0", "-bsf:v", "dump_extra=freq=keyframe",
+            "-delay", "0", "-bf", "0", "-forced-idr", "1", "-bsf:v", "dump_extra=freq=keyframe",
         ],
         Enc::Qsv => &[
             "-c:v", "hevc_qsv", "-preset", "veryfast", "-async_depth", "1", "-look_ahead", "0",
-            "-bsf:v", "dump_extra=freq=keyframe",
+            "-forced_idr", "1", "-bsf:v", "dump_extra=freq=keyframe",
         ],
         Enc::X265 => &[
             "-c:v", "libx265", "-preset", "ultrafast", "-tune", "zerolatency",
@@ -184,6 +195,9 @@ fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u
     a.extend(enc_args.iter().map(|s| s.to_string()));
     let gop = o.fps.to_string(); // 1 keyframe por segundo: viewer novo / perda de pacote se recupera rápido
     a.extend(["-b:v", &br, "-maxrate", &br, "-bufsize", &buf, "-g", &gop].iter().map(|s| s.to_string()));
+    // Keyframe também por tempo: a captura de janela só gera frames quando a janela muda,
+    // e quem entra no meio precisa de um keyframe para começar a ver.
+    a.extend(["-force_key_frames", "expr:gte(t,n_forced*1)"].iter().map(|s| s.to_string()));
     if test {
         a.extend(["-frames:v", "3", "-f", "null", "-"].iter().map(|s| s.to_string()));
     } else {
@@ -224,6 +238,49 @@ async fn detect_encoder(o: &HostOpts, cap: &Capture) -> Result<(Enc, bool)> {
         }
     }
     bail!("nenhum encoder HEVC funcionou. O ffmpeg.exe está na pasta do GameStream?")
+}
+
+/// Transforma a escolha de áudio da interface numa fonte concreta (e uma descrição para o log).
+fn resolve_audio(o: &HostOpts) -> (audio::CaptureSource, String) {
+    resolve_audio_sel(&o.audio_device, &o.source)
+}
+
+pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::CaptureSource, String) {
+    use audio::{AudioSel, CaptureSource};
+    let except_discord = || match crate::procaudio::discord_root_pid() {
+        Some(pid) => (CaptureSource::ProcessExcept(pid), "tudo do PC, menos o Discord".to_string()),
+        // Sem Discord aberto: tudo menos o próprio GameStream (não reenvia o que você está assistindo).
+        None => (CaptureSource::ProcessExcept(std::process::id()), "tudo do PC (Discord não está aberto)".to_string()),
+    };
+    match sel {
+        AudioSel::GameWindow => match source {
+            Source::Window { hwnd, title } => match sources::window_pid(*hwnd) {
+                Some(pid) => (CaptureSource::ProcessOnly(pid), format!("só o som de \"{title}\"")),
+                None => except_discord(),
+            },
+            Source::Monitor(_) => except_discord(),
+        },
+        AudioSel::AllExceptDiscord => except_discord(),
+        AudioSel::App { pid, name } => {
+            let pid = crate::procaudio::pid_by_exe(name).unwrap_or(*pid);
+            (CaptureSource::ProcessOnly(pid), format!("só o som de {name}"))
+        }
+        AudioSel::DefaultOutput => (CaptureSource::Output(None), "tudo do PC (inclui o Discord)".into()),
+        AudioSel::Output(n) => (CaptureSource::Output(Some(n.clone())), format!("tudo que toca em {n}")),
+        AudioSel::Input(n) => (CaptureSource::Input(n.clone()), format!("entrada {n}")),
+    }
+}
+
+/// O FFmpeg tem o filtro `gfxcapture` (Windows Graphics Capture)? Existe a partir do FFmpeg 8.
+async fn has_gfxcapture(ffmpeg: &str) -> bool {
+    let out = Command::new(ffmpeg)
+        .args(["-hide_banner", "-h", "filter=gfxcapture"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .await;
+    out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("gfxcapture AVOptions"))
 }
 
 /// Acha um VPS HEVC (NAL tipo 32) — o encoder sempre manda VPS/SPS/PPS antes de cada keyframe.
@@ -393,14 +450,18 @@ pub async fn run(o: HostOpts, stop: impl Future<Output = ()>) -> Result<()> {
 
 async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()> {
     if o.ffmpeg == "ffmpeg" {
-        if let Ok(exe) = std::env::current_exe() {
-            let local = exe.with_file_name("ffmpeg.exe");
-            if local.exists() {
-                o.ffmpeg = local.to_string_lossy().into_owned();
-            }
+        // Usa o ffmpeg.exe da pasta do GameStream ou do PATH; se não houver, baixa (só na primeira vez).
+        o.ffmpeg = tokio::task::spawn_blocking(crate::updater::ensure_ffmpeg).await??;
+    }
+    let mut cap = sources::resolve(&o.source)?;
+    if let Source::Window { hwnd, .. } = &o.source {
+        if has_gfxcapture(&o.ffmpeg).await {
+            log("Captura de janela nativa (Windows Graphics Capture): segue a janela e funciona mesmo coberta.");
+            cap = Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd) };
+        } else {
+            log("Este FFmpeg não tem captura de janela nativa; usando recorte da tela (atualize o ffmpeg.exe).");
         }
     }
-    let cap = sources::resolve(&o.source)?;
     log("Detectando encoder de vídeo...");
     let (enc, cpu_copy) = detect_encoder(&o, &cap).await?;
     let start_br = if o.auto_bitrate { (o.bitrate_mbps * 7 / 10).max(MIN_BITRATE) } else { o.bitrate_mbps };
@@ -428,9 +489,19 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let audio_fmt = if !o.audio {
         None
     } else {
-        match audio::start_capture(atx.clone(), o.audio_device.clone()) {
+        let (src, desc) = resolve_audio(&o);
+        let mic = o.mic.clone().map(|d| (d, 1.0));
+        let started = match audio::start_capture(atx.clone(), src, mic.clone()) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // Captura por processo indisponível (Windows antigo?): cai para o som do PC todo.
+                log(format!("Áudio: não deu para capturar só um programa ({e:#}); usando o som do PC todo."));
+                audio::start_capture(atx.clone(), audio::CaptureSource::Output(None), mic)
+            }
+        };
+        match started {
             Ok((h, rate, ch)) => {
-                log(format!("Áudio: {} ({rate} Hz, {ch} canais)", o.audio_device.label()));
+                log(format!("Áudio: {desc}{}", if o.mic.is_some() { " + microfone" } else { "" }));
                 _audio_handle = Some(h);
                 Some((rate, ch))
             }
@@ -515,7 +586,14 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let (br_tx, br_rx) = watch::channel(start_br);
 
     let (cap_tx, cap_rx) = watch::channel(cap.clone());
-    let tracker = track_window(o.source.clone(), cap.clone(), cap_tx);
+    let tracker = async {
+        if cap.hwnd.is_some() {
+            // A captura nativa já acompanha a janela sozinha.
+            std::future::pending::<()>().await
+        } else {
+            track_window(o.source.clone(), cap.clone(), cap_tx).await
+        }
+    };
     let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone());
     let vtx_preview = vtx.clone();
 
@@ -670,9 +748,31 @@ async fn handle_viewer(
         }
     };
 
+    // Estatísticas para o viewer: perda de pacotes medida aqui (ele não tem como saber sozinho).
+    let stats = {
+        let conn = conn.clone();
+        async move {
+            let mut s = conn.open_uni().await?;
+            s.write_all(&[net::STREAM_STATS]).await?;
+            let mut prev = conn.stats().path;
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let now = conn.stats().path;
+                let (sent, lost) = (now.sent_packets - prev.sent_packets, now.lost_packets - prev.lost_packets);
+                let loss = if sent > 0 { lost as f64 * 100.0 / sent as f64 } else { 0.0 };
+                let target = state::host(|h| h.bitrate);
+                s.write_all(format!("loss={loss:.2};target={target}\n").as_bytes()).await?;
+                prev = now;
+            }
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        }
+    };
+
     let res: Result<()> = tokio::select! {
         r = video => r,
         r = audio => r,
+        r = stats => r,
         e = conn.closed() => Err(e.into()),
     };
     viewers.lock().unwrap().remove(&addr);

@@ -6,8 +6,10 @@ mod gui;
 mod host;
 mod invite;
 mod net;
+mod procaudio;
 mod sources;
 mod state;
+mod updater;
 mod viewer;
 
 use anyhow::{Context, Result};
@@ -45,9 +47,13 @@ enum Cmd {
         encoder: String,
         #[arg(long)]
         no_audio: bool,
-        /// Nome do dispositivo de áudio a capturar (saída ou entrada; veja `gamestream sources`)
+        /// Som a transmitir: game (só o jogo da janela) | no-discord (tudo menos o Discord, padrão) |
+        /// all (tudo) | app:NOME.exe | output:DISPOSITIVO | input:DISPOSITIVO
+        #[arg(long, default_value = "auto")]
+        audio: String,
+        /// Mistura o microfone (nome do dispositivo de entrada). Deixe sem se estiver em call no Discord.
         #[arg(long)]
-        audio_device: Option<String>,
+        mic: Option<String>,
         #[arg(long)]
         no_upnp: bool,
         #[arg(long)]
@@ -69,6 +75,23 @@ enum Cmd {
     },
     /// Lista monitores e janelas que podem ser transmitidos
     Sources,
+    /// Verifica e instala a versão mais nova do GameStream
+    Update,
+    /// Garante o FFmpeg (baixa se não houver) e mostra qual será usado
+    Ffmpeg,
+    /// Testa a captura de áudio: mostra o nível do som capturado por alguns segundos
+    AudioTest {
+        /// Mesmo formato do --audio do host
+        #[arg(long, default_value = "no-discord")]
+        audio: String,
+        /// Janela (para --audio game)
+        #[arg(long)]
+        window: Option<String>,
+        #[arg(long)]
+        mic: Option<String>,
+        #[arg(long, default_value_t = 4)]
+        secs: u32,
+    },
 }
 
 fn main() {
@@ -86,8 +109,11 @@ fn main() {
             eprintln!("Erro: {e:#}");
             std::process::exit(1);
         }
-    } else if let Err(e) = gui::run() {
-        eprintln!("Erro na interface: {e}");
+    } else {
+        updater::cleanup_old();
+        if let Err(e) = gui::run() {
+            eprintln!("Erro na interface: {e}");
+        }
     }
 }
 
@@ -115,16 +141,73 @@ fn cli() -> Result<()> {
             for d in audio::input_devices() {
                 println!("  {d}");
             }
+            println!("Programas tocando som agora (--audio app:NOME):");
+            for (pid, n) in procaudio::audio_apps() {
+                println!("  {n}  (pid {pid})");
+            }
+            match procaudio::discord_root_pid() {
+                Some(p) => println!("Discord aberto (pid {p}): --audio no-discord exclui ele."),
+                None => println!("Discord não está aberto."),
+            }
             Ok(())
         }
-        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio_device, no_upnp, password, ffmpeg } => {
-            let audio_device = match audio_device {
-                None => audio::AudioSel::DefaultOutput,
-                Some(n) if audio::input_devices().contains(&n) && !audio::output_devices().contains(&n) => {
-                    audio::AudioSel::Input(n)
+        Cmd::Update => {
+            println!("Versão atual: v{}", updater::VERSION);
+            match updater::check()? {
+                None => println!("Você já está na versão mais nova."),
+                Some(rel) => {
+                    println!("Baixando {}...", rel.tag);
+                    updater::install(&rel)?;
+                    println!("Pronto! Abra o GameStream de novo para usar a versão {}.", rel.tag);
                 }
-                Some(n) => audio::AudioSel::Output(n),
+            }
+            Ok(())
+        }
+        Cmd::Ffmpeg => {
+            let f = updater::ensure_ffmpeg()?;
+            println!("FFmpeg: {f}");
+            Ok(())
+        }
+        Cmd::AudioTest { audio: a, window, mic, secs } => {
+            let source = match window {
+                Some(t) => {
+                    let w = sources::find_window(&t).with_context(|| format!("nenhuma janela com \"{t}\" no título"))?;
+                    sources::Source::Window { hwnd: w.hwnd, title: w.title }
+                }
+                None => sources::Source::Monitor(0),
             };
+            let (src, desc) = if let Some(name) = a.strip_prefix("except:") {
+                // Diagnóstico: tudo menos um programa qualquer (o mesmo mecanismo do "menos o Discord").
+                let pid = procaudio::pid_by_exe(name).with_context(|| format!("{name} não está rodando"))?;
+                (audio::CaptureSource::ProcessExcept(pid), format!("tudo menos {name}"))
+            } else {
+                let sel = parse_audio(&a, matches!(source, sources::Source::Window { .. }))?;
+                host::resolve_audio_sel(&sel, &source)
+            };
+            println!("Capturando: {desc}");
+            let (tx, mut rx) = tokio::sync::broadcast::channel::<bytes::Bytes>(4096);
+            let (_pipe, _, _) = audio::start_capture(tx, src, mic.map(|d| (d, 1.0)))?;
+            rt.block_on(async {
+                for s in 1..=secs {
+                    let end = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+                    let (mut sum, mut n, mut peak) = (0f64, 0u64, 0i32);
+                    while let Ok(Ok(b)) = tokio::time::timeout_at(end, rx.recv()).await {
+                        for c in b[4..].chunks_exact(2) {
+                            let v = i16::from_le_bytes([c[0], c[1]]) as i32;
+                            sum += (v as f64) * (v as f64);
+                            n += 1;
+                            peak = peak.max(v.abs());
+                        }
+                    }
+                    let rms = if n > 0 { (sum / n as f64).sqrt() / 32768.0 } else { 0.0 };
+                    let db = if rms > 0.0 { 20.0 * rms.log10() } else { -120.0 };
+                    println!("  {s}s: {:>6.1} dBFS  pico {:>5.1}%  ({} amostras)", db, peak as f64 / 327.68, n);
+                }
+            });
+            Ok(())
+        }
+        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, password, ffmpeg } => {
+            let audio_device = parse_audio(&audio, window.is_some())?;
             let source = match window {
                 Some(t) => {
                     let w = sources::find_window(&t).with_context(|| format!("nenhuma janela com \"{t}\" no título"))?;
@@ -141,6 +224,7 @@ fn cli() -> Result<()> {
                 encoder,
                 audio: !no_audio,
                 audio_device,
+                mic,
                 password,
                 upnp: !no_upnp,
                 ffmpeg,
@@ -159,4 +243,20 @@ fn cli() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn parse_audio(a: &str, window: bool) -> Result<audio::AudioSel> {
+    Ok(match a {
+        "game" => audio::AudioSel::GameWindow,
+        "all" => audio::AudioSel::DefaultOutput,
+        "no-discord" => audio::AudioSel::AllExceptDiscord,
+        "auto" if window => audio::AudioSel::GameWindow,
+        "auto" => audio::AudioSel::AllExceptDiscord,
+        a => match a.split_once(':') {
+            Some(("app", n)) => audio::AudioSel::App { pid: 0, name: n.to_string() },
+            Some(("output", n)) => audio::AudioSel::Output(n.to_string()),
+            Some(("input", n)) => audio::AudioSel::Input(n.to_string()),
+            _ => anyhow::bail!("--audio inválido: {a}"),
+        },
+    })
 }
