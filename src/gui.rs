@@ -281,7 +281,7 @@ impl App {
                     Source::Window { hwnd: *hwnd, title: title.clone() }
                 }
                 None => {
-                    state::host(|h| h.error = Some("Escolha a janela do jogo antes de iniciar.".into()));
+                    state::host(|h| h.error = Some("Selecione uma janela antes de iniciar a transmissão.".into()));
                     return;
                 }
             },
@@ -343,10 +343,10 @@ impl App {
             return;
         }
 
-        card(ui, "1. O que transmitir", |ui| {
+        card(ui, "1. Fonte de vídeo", |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.src_kind, SrcKind::Monitor, "🖥  Monitor inteiro");
-                ui.selectable_value(&mut self.src_kind, SrcKind::Window, "🎮  Só a janela do jogo");
+                ui.selectable_value(&mut self.src_kind, SrcKind::Monitor, "🖥  Monitor");
+                ui.selectable_value(&mut self.src_kind, SrcKind::Window, "🎮  Janela específica");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("⟳").on_hover_text("Atualizar listas de monitores, janelas e áudio").clicked() {
                         self.refresh();
@@ -366,7 +366,7 @@ impl App {
                         });
                 }
                 SrcKind::Window => {
-                    let sel = self.sel_window.as_ref().map(|(_, t)| t.clone()).unwrap_or("Escolha a janela do jogo...".into());
+                    let sel = self.sel_window.as_ref().map(|(_, t)| t.clone()).unwrap_or("Selecione a janela...".into());
                     egui::ComboBox::from_id_salt("window")
                         .width(ui.available_width())
                         .selected_text(sel)
@@ -375,19 +375,19 @@ impl App {
                                 ui.selectable_value(&mut self.sel_window, Some((w.hwnd, w.title.clone())), &w.title);
                             }
                         });
-                    hint(ui, "Captura direto do Windows: pode mover, redimensionar ou cobrir a janela que a transmissão continua. Só não minimize.");
+                    hint(ui, "Captura nativa do Windows: a janela pode ser movida, redimensionada ou sobreposta sem interromper a transmissão. Evite minimizá-la.");
                 }
             }
             ui.add_space(4.0);
-            ui.checkbox(&mut self.preview, "👁  Ver minha transmissão (prévia sem som, como no Discord)");
+            ui.checkbox(&mut self.preview, "👁  Exibir pré-visualização da transmissão (sem áudio)");
             hint(
                 ui,
-                "Abre uma janela com exatamente o que os amigos estão vendo. Se ela ficar no mesmo monitor transmitido, \
-                 aparece o efeito espelho: arraste a prévia para o outro monitor.",
+                "Abre uma janela com a imagem exata recebida pelos espectadores. Se ela estiver no monitor transmitido, \
+                 ocorre o efeito espelho; posicione a pré-visualização em outro monitor.",
             );
         });
 
-        // Troca o padrão de áudio junto com a fonte: janela -> só o jogo; monitor -> tudo menos o Discord.
+        // Ajusta o padrão de áudio conforme a fonte: janela -> áudio do aplicativo; monitor -> sistema exceto Discord.
         if self.src_kind != self.last_src_kind {
             match (self.src_kind, &self.audio_sel) {
                 (SrcKind::Window, AudioSel::AllExceptDiscord) => self.audio_sel = AudioSel::GameWindow,
@@ -400,7 +400,7 @@ impl App {
         card(ui, "2. Áudio", |ui| {
             ui.checkbox(&mut self.audio, "Transmitir áudio");
             ui.add_enabled_ui(self.audio, |ui| {
-                ui.label("O que os amigos vão ouvir:");
+                ui.label("Fonte de áudio:");
                 let window_mode = self.src_kind == SrcKind::Window;
                 egui::ComboBox::from_id_salt("audio_src")
                     .width(ui.available_width())
@@ -416,7 +416,7 @@ impl App {
                         );
                         if !self.audio_apps.is_empty() {
                             ui.separator();
-                            ui.label(RichText::new("Só um programa (que está tocando som agora)").small().color(MUTED_TXT));
+                            ui.label(RichText::new("Aplicativo específico (com áudio ativo)").small().color(MUTED_TXT));
                             for (pid, name) in &self.audio_apps {
                                 let v = AudioSel::App { pid: *pid, name: name.clone() };
                                 let l = v.label();
@@ -424,7 +424,7 @@ impl App {
                             }
                         }
                         ui.separator();
-                        ui.label(RichText::new("Tudo que toca numa saída (inclui o Discord)").small().color(MUTED_TXT));
+                        ui.label(RichText::new("Dispositivo de saída (inclui o Discord)").small().color(MUTED_TXT));
                         ui.selectable_value(&mut self.audio_sel, AudioSel::DefaultOutput, AudioSel::DefaultOutput.label());
                         for d in &self.out_devices {
                             let v = AudioSel::Output(d.clone());
@@ -432,7 +432,7 @@ impl App {
                             ui.selectable_value(&mut self.audio_sel, v, l);
                         }
                         ui.separator();
-                        ui.label(RichText::new("Entradas (mixagem estéreo, placa de captura...)").small().color(MUTED_TXT));
+                        ui.label(RichText::new("Dispositivos de entrada (mixagem estéreo, placa de captura)").small().color(MUTED_TXT));
                         for d in &self.in_devices {
                             let v = AudioSel::Input(d.clone());
                             let l = v.label();
@@ -440,25 +440,25 @@ impl App {
                         }
                     });
                 match &self.audio_sel {
-                    AudioSel::GameWindow => hint(ui, "Só o som do jogo: Discord, navegador e notificações ficam de fora."),
+                    AudioSel::GameWindow => hint(ui, "Somente o áudio do aplicativo transmitido. Discord, navegador e notificações não são incluídos."),
                     AudioSel::AllExceptDiscord => hint(
                         ui,
-                        "Tudo que toca no PC, menos o Discord: quem está na call não ouve a própria voz de volta.",
+                        "Todo o áudio do sistema, exceto o Discord. Evita que participantes de uma chamada de voz ouçam o próprio retorno.",
                     ),
-                    AudioSel::App { .. } => hint(ui, "Só o som desse programa. Se não aparecer, abra o jogo e clique em ⟳."),
+                    AudioSel::App { .. } => hint(ui, "Somente o áudio deste aplicativo. Caso ele não esteja na lista, inicie-o e clique em ⟳."),
                     AudioSel::DefaultOutput | AudioSel::Output(_) => {
                         ui.label(
-                            RichText::new("⚠ Inclui o Discord: se vocês estiverem em call, os amigos vão ouvir as próprias vozes de volta.")
+                            RichText::new("⚠ Inclui o Discord: durante uma chamada de voz, os participantes ouvirão o retorno das próprias vozes.")
                                 .small()
                                 .color(Color32::from_rgb(255, 190, 90)),
                         );
                     }
-                    AudioSel::Input(_) => hint(ui, "Captura uma entrada de áudio."),
+                    AudioSel::Input(_) => hint(ui, "Captura um dispositivo de entrada de áudio."),
                 }
 
                 ui.add_space(6.0);
                 let mut mic_on = self.mic.is_some();
-                if ui.checkbox(&mut mic_on, "🎤 Incluir meu microfone").changed() {
+                if ui.checkbox(&mut mic_on, "🎤 Incluir microfone").changed() {
                     self.mic = if mic_on { audio::default_input().or_else(|| self.in_devices.first().cloned()) } else { None };
                 }
                 if let Some(cur) = self.mic.clone() {
@@ -468,12 +468,12 @@ impl App {
                         }
                     });
                     ui.label(
-                        RichText::new("⚠ Se vocês estiverem conversando no Discord, deixe DESLIGADO: os amigos ouviriam sua voz duas vezes (pelo Discord e pela transmissão).")
+                        RichText::new("⚠ Mantenha desativado durante chamadas no Discord: sua voz seria reproduzida em duplicidade (pela chamada e pela transmissão).")
                             .small()
                             .color(Color32::from_rgb(255, 190, 90)),
                     );
                 } else {
-                    hint(ui, "Desligado (recomendado se vocês já estão em call no Discord).");
+                    hint(ui, "Desativado (recomendado durante chamadas de voz no Discord).");
                 }
             });
         });
@@ -483,14 +483,14 @@ impl App {
                 ui.selectable_value(&mut self.auto_bitrate, true, "⚡ Automático");
                 ui.selectable_value(&mut self.auto_bitrate, false, "📌 Fixo");
             });
-            let label = if self.auto_bitrate { "Mbps no máximo" } else { "Mbps" };
+            let label = if self.auto_bitrate { "Mbps (máximo)" } else { "Mbps" };
             ui.add(egui::Slider::new(&mut self.bitrate, 3..=60).text(label));
             hint(
                 ui,
                 if self.auto_bitrate {
-                    "Começa em 70% do máximo, cai sozinho se alguém perder pacotes e volta a subir quando a conexão estabiliza. Segue o amigo com a internet mais fraca."
+                    "Inicia em 70% do máximo, reduz automaticamente quando há perda de pacotes e volta a aumentar quando a conexão se estabiliza. O ajuste acompanha o espectador com a conexão mais lenta."
                 } else {
-                    "Sempre o mesmo bitrate. Se a internet de alguém não aguentar, a imagem dele trava."
+                    "Bitrate constante. Espectadores com conexão insuficiente podem ter travamentos."
                 },
             );
             ui.horizontal(|ui| {
@@ -499,20 +499,20 @@ impl App {
                     ui.selectable_value(&mut self.fps, f, f.to_string());
                 }
             });
-            egui::CollapsingHeader::new("Qual bitrate escolher?").show(ui, |ui| bitrate_guide(ui, self.bitrate, &mut self.friends));
+            egui::CollapsingHeader::new("Guia de bitrate").show(ui, |ui| bitrate_guide(ui, self.bitrate, &mut self.friends));
         });
 
-        card(ui, "4. Acesso", |ui| {
+        card(ui, "4. Acesso e segurança", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Senha:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.password)
                         .password(true)
                         .desired_width(ui.available_width())
-                        .hint_text("recomendado"),
+                        .hint_text("Recomendado"),
                 );
             });
-            ui.checkbox(&mut self.upnp, "Tentar abrir a porta no roteador (UPnP)");
+            ui.checkbox(&mut self.upnp, "Abrir porta automaticamente no roteador (UPnP)");
             egui::CollapsingHeader::new("Avançado").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Encoder:");
@@ -538,10 +538,10 @@ impl App {
                     ui.label(RichText::new("Preparando a transmissão...").size(17.0).strong());
                 });
                 if let Some(p) = *crate::updater::FFMPEG_PROGRESS.lock().unwrap() {
-                    ui.label("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Só na primeira vez.");
+                    ui.label("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Necessário apenas na primeira transmissão.");
                     ui.add(egui::ProgressBar::new(p).show_percentage());
                 } else {
-                    hint(ui, "Detectando o encoder da placa de vídeo e abrindo a conexão. Leva alguns segundos.");
+                    hint(ui, "Detectando o encoder da placa de vídeo e inicializando a conexão.");
                 }
             });
         } else {
@@ -552,15 +552,15 @@ impl App {
                 });
                 ui.add_space(6.0);
                 ui.columns(4, |c| {
-                    stat(&mut c[0], "Assistindo", st.viewers.len().to_string());
+                    stat(&mut c[0], "Espectadores", st.viewers.len().to_string());
                     stat(&mut c[1], "Bitrate alvo", format!("{} Mbps", st.bitrate));
-                    stat(&mut c[2], "Saindo agora", format!("{:.1} Mbps", st.mbps));
-                    stat(&mut c[3], "Seu upload", format!("{:.0} Mbps", st.mbps * st.viewers.len() as f64));
+                    stat(&mut c[2], "Taxa de saída", format!("{:.1} Mbps", st.mbps));
+                    stat(&mut c[3], "Upload total", format!("{:.0} Mbps", st.mbps * st.viewers.len() as f64));
                 });
                 ui.horizontal(|ui| {
                     hint(ui, &format!("Encoder: {}", st.encoder));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = if st.preview_open { "👁  Fechar prévia" } else { "👁  Ver minha transmissão" };
+                        let label = if st.preview_open { "👁  Ocultar pré-visualização" } else { "👁  Exibir pré-visualização" };
                         if ui.button(label).clicked() {
                             self.preview = !st.preview_open;
                             host::set_preview(self.preview);
@@ -580,24 +580,24 @@ impl App {
                             state::log("Convite copiado.");
                         }
                     }
-                    if ui.button("Ver convite").clicked() {
+                    if ui.button("Exibir convite").clicked() {
                         self.popup = st.invite.clone();
                     }
                 });
                 ui.label(format!("🔒 Código de segurança: {}", st.security_code));
-                egui::CollapsingHeader::new("Por onde os amigos podem conectar").show(ui, |ui| {
+                egui::CollapsingHeader::new("Endereços de conexão").show(ui, |ui| {
                     for r in &st.reach {
                         hint(ui, r);
                     }
                 });
             });
 
-            card(ui, "Quem está assistindo", |ui| {
+            card(ui, "Espectadores conectados", |ui| {
                 if st.preview_open {
-                    ui.label(RichText::new("🖥  Você (prévia, sem som)").color(MUTED_TXT));
+                    ui.label(RichText::new("🖥  Pré-visualização local (sem áudio)").color(MUTED_TXT));
                 }
                 if st.viewers.is_empty() {
-                    hint(ui, "Nenhum amigo ainda. Mande o convite e a senha.");
+                    hint(ui, "Nenhum espectador conectado. Compartilhe o convite e a senha.");
                 }
                 for v in &st.viewers {
                     ui.label(format!("👤  {v}"));
@@ -617,7 +617,7 @@ impl App {
             return;
         }
 
-        card(ui, "Entrar numa transmissão", |ui| {
+        card(ui, "Conectar a uma transmissão", |ui| {
             ui.add_enabled_ui(!running, |ui| {
                 ui.label("Convite:");
                 ui.add(
@@ -625,13 +625,13 @@ impl App {
                         .desired_rows(3)
                         .desired_width(f32::INFINITY)
                         .font(egui::TextStyle::Monospace)
-                        .hint_text("Cole aqui (Ctrl+V) o convite GS-... que o amigo mandou"),
+                        .hint_text("Cole o convite (GS-...) recebido do transmissor"),
                 );
                 ui.horizontal(|ui| {
                     ui.label("Senha:");
                     ui.add(egui::TextEdit::singleline(&mut self.view_password).password(true).desired_width(ui.available_width()));
                 });
-                ui.label("Tocar o som em:");
+                ui.label("Saída de áudio:");
                 let sel = self.view_out.clone().unwrap_or("Padrão do Windows".into());
                 egui::ComboBox::from_id_salt("view_out").width(ui.available_width()).selected_text(sel).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.view_out, None, "Padrão do Windows");
@@ -658,14 +658,14 @@ impl App {
     fn view_live_ui(&mut self, ui: &mut egui::Ui, vs: &state::ViewStatus) {
         card(ui, "", |ui| {
             ui.horizontal(|ui| {
-                pill(ui, "ASSISTINDO", OK);
+                pill(ui, "CONECTADO", OK);
                 ui.label(RichText::new(&vs.peer).strong());
             });
             if vs.verified {
-                ui.label(format!("🔒 Criptografado · identidade do host verificada · código {}", vs.code));
+                ui.label(format!("🔒 Conexão criptografada · identidade do transmissor verificada · código {}", vs.code));
             } else {
                 ui.label(
-                    RichText::new(format!("⚠ Criptografado, mas identidade NÃO verificada (conectou por IP) · código {}", vs.code))
+                    RichText::new(format!("⚠ Conexão criptografada, porém a identidade do transmissor não foi verificada (conexão por IP) · código {}", vs.code))
                         .color(Color32::from_rgb(255, 190, 90)),
                 );
             }
@@ -680,10 +680,10 @@ impl App {
                     let col = if s.loss >= 2.0 { warn } else { Color32::WHITE };
                     ui.label(RichText::new(format!("{:.1}%", s.loss)).size(20.0).strong().color(col));
                 });
-                stat(&mut c[3], "Recebendo", format!("{:.1} Mbps", s.mbps));
+                stat(&mut c[3], "Taxa recebida", format!("{:.1} Mbps", s.mbps));
             });
             if s.loss >= 2.0 {
-                hint(ui, "Perda alta: sua internet (ou o Wi-Fi) não está dando conta. Se o host usa bitrate automático, ele vai baixar sozinho.");
+                hint(ui, "Perda de pacotes elevada: a conexão (ou o Wi-Fi) está instável. Com bitrate automático, o transmissor reduzirá a taxa.");
             }
         });
 
@@ -691,7 +691,7 @@ impl App {
         let mut ctl = state::VIEW_CTL.lock().unwrap().clone();
         card(ui, "Som", |ui| {
             ui.horizontal(|ui| {
-                let label = if ctl.muted { "Ativar som" } else { "Mutar" };
+                let label = if ctl.muted { "Ativar som" } else { "Silenciar" };
                 if ui.button(label).clicked() {
                     ctl.muted = !ctl.muted;
                 }
@@ -705,22 +705,23 @@ impl App {
             });
         });
 
-        card(ui, "Janela do vídeo", |ui| {
+        card(ui, "Janela de vídeo", |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Tela cheia").clicked() {
                     ctl.fullscreen_toggles += 1;
                 }
-                ui.checkbox(&mut ctl.on_top, "Sempre por cima das outras janelas");
+                ui.checkbox(&mut ctl.on_top, "Manter sobre as demais janelas");
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("Controles dentro do vídeo").strong());
+            ui.label(RichText::new("Controles na janela de vídeo").strong());
             for (k, v) in [
-                ("Mexa o mouse", "aparece o painel no canto inferior direito (som, volume, zoom, tela cheia)"),
-                ("Scroll", "zoom no ponto onde o mouse está: para cima aproxima, para baixo volta"),
-                ("Arrastar", "com zoom, move a imagem"),
-                ("Clique do meio", "volta ao tamanho normal"),
+                ("Mover o mouse", "exibe o painel de controles no canto inferior direito"),
+                ("Roda do mouse", "zoom a partir da posição do cursor (para cima amplia, para baixo reduz)"),
+                ("Arrastar", "com zoom ativo, desloca a imagem"),
+                ("Botão do meio", "restaura o tamanho original"),
                 ("Duplo clique / F", "tela cheia"),
-                ("M · 9 · 0", "mutar · baixar · aumentar volume"),
+                ("M · 9 · 0", "silenciar · diminuir · aumentar volume"),
+                ("I", "fixa as estatísticas no canto da tela"),
             ] {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(k).strong().color(ACCENT));
@@ -793,11 +794,10 @@ impl App {
             .frame(egui::Frame::window(&ctx.style()).inner_margin(22.0).rounding(12.0_f32))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("🎉").size(34.0));
-                    ui.label(RichText::new("Você está ao vivo!").size(22.0).strong());
+                    ui.label(RichText::new("Transmissão iniciada").size(22.0).strong());
                     ui.add_space(4.0);
                     ui.label(RichText::new("✅ Convite copiado para a área de transferência").color(OK).strong());
-                    ui.label("Cole no Discord com Ctrl+V e mande a senha separada.");
+                    ui.label("Compartilhe o convite (Ctrl+V) e envie a senha por um canal separado.");
                 });
                 ui.add_space(8.0);
                 egui::Frame::none()
@@ -811,10 +811,10 @@ impl App {
                     });
                 ui.add_space(6.0);
                 ui.label(format!("🔒 Código de segurança: {code_sec}"));
-                hint(ui, "Quem assiste vê esse mesmo código. Se for diferente, alguém está interceptando.");
+                hint(ui, "Os espectadores verão este mesmo código. Um código diferente indica interceptação da conexão.");
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("📋 Copiar de novo").clicked() {
+                    if ui.button("📋 Copiar novamente").clicked() {
                         ui.output_mut(|o| o.copied_text = code.clone());
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -839,12 +839,12 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
         ui.strong("Qualidade esperada (HEVC)");
         ui.end_row();
         for (r, q) in [
-            ("3–5", "720p ok; 1080p borra em movimento rápido"),
+            ("3–5", "720p adequado; 1080p perde nitidez em movimentos rápidos"),
             ("8–10", "1080p60 boa"),
             ("15", "1080p60 muito boa (recomendado)"),
             ("20–25", "1080p excelente / 1440p60 boa / ultrawide boa"),
             ("30–40", "1440p excelente / 4K60 boa"),
-            ("50–60", "4K excelente (ideal só em rede local)"),
+            ("50–60", "4K excelente (recomendado apenas em rede local)"),
         ] {
             ui.label(r);
             ui.label(q);
@@ -852,13 +852,13 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
         }
     });
     ui.add_space(6.0);
-    ui.label(format!("• Cada amigo precisa de download de pelo menos {:.0} Mbps.", chosen as f64 * 1.3));
+    ui.label(format!("• Download mínimo por espectador: {:.0} Mbps.", chosen as f64 * 1.3));
     ui.horizontal(|ui| {
-        ui.label("• Com");
+        ui.label("• Upload mínimo para");
         ui.add(egui::DragValue::new(friends).range(1..=16));
-        ui.label(format!("amigo(s), seu upload precisa de pelo menos {:.0} Mbps.", (chosen * *friends) as f64 * 1.2));
+        ui.label(format!("espectador(es): {:.0} Mbps.", (chosen * *friends) as f64 * 1.2));
     });
-    hint(ui, "Use o número de UPLOAD do speedtest, não o de download.");
+    hint(ui, "Considere a velocidade de upload medida no teste de velocidade, não a de download.");
 }
 
 impl eframe::App for App {
@@ -896,7 +896,7 @@ impl eframe::App for App {
                                     RichText::new(format!("⬆ Atualizar para {}", rel.tag)).color(Color32::WHITE).strong(),
                                 )
                                 .fill(OK);
-                                if ui.add(b).on_hover_text("Baixa a versão nova e reinicia o GameStream").clicked() {
+                                if ui.add(b).on_hover_text("Baixa a nova versão e reinicia o GameStream").clicked() {
                                     crate::updater::apply(rel);
                                 }
                             }
@@ -914,7 +914,7 @@ impl eframe::App for App {
                         if host_live {
                             pill(ui, "AO VIVO", LIVE);
                         } else if view_live {
-                            pill(ui, "ASSISTINDO", OK);
+                            pill(ui, "CONECTADO", OK);
                         }
                     });
                 });

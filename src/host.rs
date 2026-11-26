@@ -49,27 +49,27 @@ async fn preview_loop(vtx: broadcast::Sender<VideoChunk>) {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if let Err(e) = run_preview(&vtx).await {
-            log(format!("[prévia] {e:#}"));
+            log(format!("[pré-visualização] {e:#}"));
             set_preview(false);
         }
         state::host(|h| h.preview_open = false);
     }
 }
 
-/// Mostra o vídeo que sai do encoder (o mesmo que os amigos recebem) num mpv local, sem áudio.
+/// Exibe o vídeo que sai do encoder (o mesmo recebido pelos espectadores) num mpv local, sem áudio.
 async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
     let mpv = crate::viewer::find_mpv(None);
     let mut child = Command::new(&mpv)
-        .args(crate::viewer::mpv_args("preview", "GameStream - sua transmissão (prévia, sem som)", None))
+        .args(crate::viewer::mpv_args("preview", "GameStream - Pré-visualização (sem áudio)", None))
         .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("não consegui abrir o mpv ({})", mpv.display()))?;
+        .with_context(|| format!("não foi possível abrir o player ({})", mpv.display()))?;
     let mut stdin = child.stdin.take().unwrap();
     let mut rx = vtx.subscribe();
     let mut waiting_keyframe = true;
     state::host(|h| h.preview_open = true);
-    log("[prévia] aberta (sem som).");
+    log("[pré-visualização] aberta (sem áudio).");
     loop {
         tokio::select! {
             m = rx.recv() => match m {
@@ -96,7 +96,7 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
             _ = async { while preview_wanted() { tokio::time::sleep(Duration::from_millis(200)).await; } } => break,
         }
     }
-    log("[prévia] fechada.");
+    log("[pré-visualização] fechada.");
     Ok(())
 }
 
@@ -139,7 +139,7 @@ impl Enc {
             Enc::Amf => "AMD (hevc_amf)",
             Enc::Nvenc => "NVIDIA (hevc_nvenc)",
             Enc::Qsv => "Intel (hevc_qsv)",
-            Enc::X265 => "CPU (libx265 — lento!)",
+            Enc::X265 => "CPU (libx265, desempenho reduzido)",
         }
     }
 }
@@ -237,7 +237,7 @@ async fn detect_encoder(o: &HostOpts, cap: &Capture) -> Result<(Enc, bool)> {
             }
         }
     }
-    bail!("nenhum encoder HEVC funcionou. O ffmpeg.exe está na pasta do GameStream?")
+    bail!("nenhum encoder HEVC disponível. Verifique se o ffmpeg.exe está na pasta do GameStream.")
 }
 
 /// Transforma a escolha de áudio da interface numa fonte concreta (e uma descrição para o log).
@@ -248,14 +248,14 @@ fn resolve_audio(o: &HostOpts) -> (audio::CaptureSource, String) {
 pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::CaptureSource, String) {
     use audio::{AudioSel, CaptureSource};
     let except_discord = || match crate::procaudio::discord_root_pid() {
-        Some(pid) => (CaptureSource::ProcessExcept(pid), "tudo do PC, menos o Discord".to_string()),
+        Some(pid) => (CaptureSource::ProcessExcept(pid), "todo o áudio do sistema, exceto o Discord".to_string()),
         // Sem Discord aberto: tudo menos o próprio GameStream (não reenvia o que você está assistindo).
-        None => (CaptureSource::ProcessExcept(std::process::id()), "tudo do PC (Discord não está aberto)".to_string()),
+        None => (CaptureSource::ProcessExcept(std::process::id()), "todo o áudio do sistema (Discord não está em execução)".to_string()),
     };
     match sel {
         AudioSel::GameWindow => match source {
             Source::Window { hwnd, title } => match sources::window_pid(*hwnd) {
-                Some(pid) => (CaptureSource::ProcessOnly(pid), format!("só o som de \"{title}\"")),
+                Some(pid) => (CaptureSource::ProcessOnly(pid), format!("somente o áudio de \"{title}\"")),
                 None => except_discord(),
             },
             Source::Monitor(_) => except_discord(),
@@ -263,11 +263,11 @@ pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::Capt
         AudioSel::AllExceptDiscord => except_discord(),
         AudioSel::App { pid, name } => {
             let pid = crate::procaudio::pid_by_exe(name).unwrap_or(*pid);
-            (CaptureSource::ProcessOnly(pid), format!("só o som de {name}"))
+            (CaptureSource::ProcessOnly(pid), format!("somente o áudio de {name}"))
         }
-        AudioSel::DefaultOutput => (CaptureSource::Output(None), "tudo do PC (inclui o Discord)".into()),
-        AudioSel::Output(n) => (CaptureSource::Output(Some(n.clone())), format!("tudo que toca em {n}")),
-        AudioSel::Input(n) => (CaptureSource::Input(n.clone()), format!("entrada {n}")),
+        AudioSel::DefaultOutput => (CaptureSource::Output(None), "todo o áudio do sistema (inclui o Discord)".into()),
+        AudioSel::Output(n) => (CaptureSource::Output(Some(n.clone())), format!("dispositivo de saída {n}")),
+        AudioSel::Input(n) => (CaptureSource::Input(n.clone()), format!("dispositivo de entrada {n}")),
     }
 }
 
@@ -310,7 +310,7 @@ async fn track_window(source: Source, mut current: Capture, cap_tx: watch::Sende
                 warned = false;
                 if pending.as_ref() == Some(&c) {
                     // Parou de mexer: aplica.
-                    log(format!("[janela] \"{title}\" mudou de posição/tamanho, acompanhando."));
+                    log(format!("[janela] \"{title}\" foi movida ou redimensionada; captura ajustada."));
                     current = c.clone();
                     let _ = cap_tx.send(c);
                     pending = None;
@@ -352,7 +352,7 @@ async fn encoder_loop(
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()
-            .context("não consegui iniciar o ffmpeg.exe")?;
+            .context("não foi possível iniciar o ffmpeg.exe")?;
         let mut stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         tokio::spawn(async move {
@@ -366,7 +366,7 @@ async fn encoder_loop(
             loop {
                 let n = stdout.read(&mut buf).await?;
                 if n == 0 {
-                    bail!("o encoder (ffmpeg) parou. Se a fonte for uma janela, ela foi fechada/minimizada?");
+                    bail!("o encoder (FFmpeg) foi encerrado. Se a fonte for uma janela, verifique se ela foi fechada ou minimizada.");
                 }
                 bytes_out.fetch_add(n as u64, Ordering::Relaxed);
                 let raw = Bytes::copy_from_slice(&buf[..n]);
@@ -406,9 +406,9 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
                 let (pl, ps, plg) = prev.get(addr).copied().unwrap_or(now);
                 let (dl, ds) = (now.0 - pl, now.1 - ps);
                 if now.2 > plg {
-                    bad = Some(format!("{addr} ficou para trás"));
+                    bad = Some(format!("{addr} com atraso no recebimento"));
                 } else if ds > 200 && dl * 100 > ds * 2 {
-                    bad = Some(format!("{addr} perdendo {:.1}% dos pacotes", dl as f64 * 100.0 / ds as f64));
+                    bad = Some(format!("{addr} com {:.1}% de perda de pacotes", dl as f64 * 100.0 / ds as f64));
                 }
                 prev.insert(*addr, now);
             }
@@ -450,16 +450,16 @@ pub async fn run(o: HostOpts, stop: impl Future<Output = ()>) -> Result<()> {
 
 async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()> {
     if o.ffmpeg == "ffmpeg" {
-        // Usa o ffmpeg.exe da pasta do GameStream ou do PATH; se não houver, baixa (só na primeira vez).
+        // Usa o ffmpeg.exe da pasta do GameStream ou do PATH; se não houver, faz o download (uma única vez).
         o.ffmpeg = tokio::task::spawn_blocking(crate::updater::ensure_ffmpeg).await??;
     }
     let mut cap = sources::resolve(&o.source)?;
     if let Source::Window { hwnd, .. } = &o.source {
         if has_gfxcapture(&o.ffmpeg).await {
-            log("Captura de janela nativa (Windows Graphics Capture): segue a janela e funciona mesmo coberta.");
+            log("Captura nativa de janela ativa (Windows Graphics Capture).");
             cap = Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd) };
         } else {
-            log("Este FFmpeg não tem captura de janela nativa; usando recorte da tela (atualize o ffmpeg.exe).");
+            log("Esta versão do FFmpeg não oferece captura nativa de janela; usando recorte da tela. Atualize o ffmpeg.exe.");
         }
     }
     log("Detectando encoder de vídeo...");
@@ -495,7 +495,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             Ok(v) => Ok(v),
             Err(e) => {
                 // Captura por processo indisponível (Windows antigo?): cai para o som do PC todo.
-                log(format!("Áudio: não deu para capturar só um programa ({e:#}); usando o som do PC todo."));
+                log(format!("Áudio: captura por aplicativo indisponível ({e:#}); usando todo o áudio do sistema."));
                 audio::start_capture(atx.clone(), audio::CaptureSource::Output(None), mic)
             }
         };
@@ -522,7 +522,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let mut addrs: Vec<(SocketAddr, String)> = Vec::new();
     let mut mapping = None;
     if o.upnp {
-        log("Pedindo ao roteador para abrir a porta (UPnP)...");
+        log("Solicitando abertura de porta ao roteador (UPnP)...");
         match tokio::time::timeout(Duration::from_secs(8), invite::map_port(o.port)).await {
             Ok(Ok((m, ext))) => {
                 if invite::is_public_v4(ext) {
@@ -530,8 +530,8 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                     addrs.push((SocketAddr::new(ext, o.port), "IPv4 público (porta aberta via UPnP)".into()));
                 } else {
                     log(format!(
-                        "UPnP abriu a porta, mas o roteador está atrás de CGNAT da operadora (IP externo {ext}): \
-                         amigos de fora não chegam por IPv4. Use IPv6 ou Tailscale."
+                        "UPnP: porta aberta, porém o roteador está atrás de CGNAT da operadora (IP externo {ext}). \
+                         Conexões externas por IPv4 não são possíveis; utilize IPv6 ou uma VPN (Tailscale)."
                     ));
                 }
                 mapping = Some(m);
@@ -568,9 +568,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let invite_code = invite::encode(&addrs.iter().map(|(a, _)| *a).collect::<Vec<_>>(), &id.fingerprint);
     let mut reach: Vec<String> = addrs.iter().map(|(a, k)| format!("{k}: {a}")).collect();
     if !addrs.iter().any(|(_, k)| k.starts_with("IPv4") || k.starts_with("IPv6") || k.starts_with("VPN")) {
-        reach.push("⚠ Nenhum caminho pela internet encontrado — só a rede local funciona. Veja \"Sem acesso ao modem\" no LEIA-ME (Tailscale).".into());
+        reach.push("⚠ Nenhum endereço acessível pela internet foi encontrado; apenas conexões na rede local são possíveis. Consulte a seção \"Conexão pela internet\" do LEIA-ME.".into());
     } else if addrs.iter().any(|(_, k)| k.starts_with("IPv6")) {
-        reach.push("Obs.: o IPv6 só funciona se o amigo também tiver IPv6 e o modem não bloquear conexões de entrada.".into());
+        reach.push("Obs.: conexões IPv6 exigem que o espectador também tenha IPv6 e que o modem permita conexões de entrada.".into());
     }
     log(format!("Transmitindo na porta UDP {}. Convite:\n{invite_code}", o.port));
     for r in &reach {
@@ -614,7 +614,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                 let (vtx, atx, viewers, password) = (vtx.clone(), atx.clone(), viewers.clone(), password.clone());
                 tokio::spawn(async move {
                     if let Err(e) = handle_viewer(inc, vtx, atx, audio_fmt, password, viewers).await {
-                        log(format!("[viewer] {e:#}"));
+                        log(format!("[espectador] {e:#}"));
                     }
                 });
             }
@@ -660,7 +660,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = renew => Ok(()),
         _ = stop => Ok(()),
     };
-    ep.close(0u32.into(), b"host encerrou");
+    ep.close(0u32.into(), b"transmissao encerrada pelo host");
     if let Some(m) = &mapping {
         m.remove().await;
     }
@@ -684,7 +684,7 @@ async fn handle_viewer(
     let pw = auth.read_to_end(1024).await?;
     if let Some(p) = &password {
         if pw != p.as_bytes() {
-            log(format!("[viewer] {shown} recusado: senha incorreta"));
+            log(format!("[espectador] {shown} recusado: senha incorreta"));
             tokio::time::sleep(Duration::from_secs(1)).await; // freia tentativas de adivinhar a senha
             conn.close(1u32.into(), b"senha incorreta");
             return Ok(());
@@ -693,7 +693,7 @@ async fn handle_viewer(
 
     let lagged = Arc::new(AtomicU64::new(0));
     viewers.lock().unwrap().insert(addr, Viewer { conn: conn.clone(), lagged: lagged.clone() });
-    log(format!("[viewer] + {shown} conectou"));
+    log(format!("[espectador] + {shown} conectado"));
 
     let video = {
         let conn = conn.clone();
@@ -777,8 +777,8 @@ async fn handle_viewer(
     };
     viewers.lock().unwrap().remove(&addr);
     match res {
-        Err(e) => log(format!("[viewer] - {shown} saiu ({e})")),
-        Ok(()) => log(format!("[viewer] - {shown} saiu")),
+        Err(e) => log(format!("[espectador] - {shown} desconectado ({e})")),
+        Ok(()) => log(format!("[espectador] - {shown} desconectado")),
     }
     Ok(())
 }

@@ -12,7 +12,7 @@ pub struct HostStatus {
     pub bitrate: u32,
     pub viewers: Vec<String>,
     pub invite: Option<String>,
-    /// Linhas descrevendo por onde os amigos conseguem chegar (LAN, IPv6, UPnP...).
+    /// Endereços pelos quais os espectadores podem se conectar (LAN, IPv6, UPnP...).
     pub reach: Vec<String>,
     /// Último erro (mostrado em destaque na interface).
     pub error: Option<String>,

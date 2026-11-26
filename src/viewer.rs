@@ -116,7 +116,7 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
 async fn run_inner(o: ViewOpts) -> Result<()> {
     let inv = invite::decode(&o.invite, net::DEFAULT_PORT).await?;
     if inv.fingerprint.is_none() {
-        log("Aviso: conectando por IP direto, sem verificar a identidade do host. Prefira o convite GS-...");
+        log("Aviso: conexão por IP direto, sem verificação da identidade do transmissor. Recomenda-se usar o convite GS-...");
     }
     view_phase(ViewPhase::Connecting, "Conectando...");
     log(format!("Conectando ({} endereço(s))...", inv.addrs.len()));
@@ -143,13 +143,13 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         Err(last.unwrap_or_else(|| anyhow!("nenhum endereço")))
     })
     .await
-    .map_err(|_| anyhow!("tempo esgotado: o host está transmitindo? Vocês estão na mesma VPN ou os dois têm IPv6?"))??;
+    .map_err(|_| anyhow!("tempo de conexão esgotado. Verifique se a transmissão está ativa e se há um caminho de rede disponível (mesma VPN, IPv6 ou porta aberta)."))??;
     tries.abort_all();
 
     // Sem convite (IP direto) não há como saber se é mesmo o host: não manda a senha às cegas.
     if inv.fingerprint.is_none() && o.password.is_some() {
         conn.close(0u32.into(), b"");
-        bail!("por segurança, a senha só é enviada quando você conecta pelo convite GS-... (que verifica a identidade do host)");
+        bail!("por segurança, a senha só é enviada em conexões pelo convite GS-..., que verifica a identidade do transmissor");
     }
     let mut auth = conn.open_uni().await?;
     auth.write_all(o.password.unwrap_or_default().as_bytes()).await?;
@@ -158,12 +158,12 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let code = net::peer_security_code(&conn).unwrap_or_else(|| "?".into());
     let verified = inv.fingerprint.is_some();
     log(format!(
-        "Conectado em {via} (criptografado, {}). Código de segurança do host: {code}",
-        if verified { "identidade verificada pelo convite" } else { "identidade NÃO verificada" }
+        "Conectado a {via} (criptografado, {}). Código de segurança do transmissor: {code}",
+        if verified { "identidade verificada pelo convite" } else { "identidade não verificada" }
     ));
     state::view(|v| {
         v.phase = ViewPhase::Connected;
-        v.text = "Assistindo".into();
+        v.text = "Conectado".into();
         v.peer = via.clone();
         v.code = code.clone();
         v.verified = verified;
@@ -172,11 +172,11 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let pipe = format!(r"\\.\pipe\gamestream-mpv-{}", std::process::id());
     let mpv = find_mpv(o.mpv);
     let mut child = Command::new(&mpv)
-        .args(mpv_args("viewer", &format!("GameStream - assistindo {via}"), Some(&pipe)))
+        .args(mpv_args("viewer", &format!("GameStream - {via}"), Some(&pipe)))
         .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("não achei o mpv ({}). Coloque o mpv.exe na mesma pasta do gamestream.exe", mpv.display()))?;
+        .with_context(|| format!("player não encontrado ({}). O mpv.exe deve estar na mesma pasta do gamestream.exe", mpv.display()))?;
     let mut stdin = Some(child.stdin.take().unwrap());
 
     let mut tasks = JoinSet::new();
@@ -194,15 +194,15 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                 let mut st = match st {
                     Ok(s) => s,
                     Err(quinn::ConnectionError::ApplicationClosed(c)) => {
-                        break Err(anyhow!("o host fechou a conexão: {}", String::from_utf8_lossy(&c.reason)));
+                        break Err(anyhow!("o transmissor encerrou a conexão: {}", String::from_utf8_lossy(&c.reason)));
                     }
-                    Err(e) => break Err(anyhow!("conexão com o host caiu: {e}")),
+                    Err(e) => break Err(anyhow!("conexão com o transmissor perdida: {e}")),
                 };
                 let mut kind = [0u8; 1];
                 st.read_exact(&mut kind).await?;
                 match kind[0] {
                     net::STREAM_VIDEO => {
-                        let Some(mut pipe_in) = stdin.take() else { bail!("host mandou dois streams de vídeo") };
+                        let Some(mut pipe_in) = stdin.take() else { bail!("o transmissor enviou dois fluxos de vídeo") };
                         let (frames, bytes) = (frames.clone(), bytes.clone());
                         tasks.spawn(async move {
                             let mut buf = Vec::new();
@@ -250,19 +250,19 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                                     anyhow::Ok(())
                                 });
                             }
-                            Err(e) => log(format!("Sem áudio: {e:#}")),
+                            Err(e) => log(format!("Áudio indisponível: {e:#}")),
                         }
                     }
-                    k => log(format!("stream desconhecido: {k}")),
+                    k => log(format!("fluxo desconhecido: {k}")),
                 }
             }
             Some(r) = tasks.join_next() => {
                 break match r? {
-                    Ok(()) => { log("O host encerrou a transmissão."); Ok(()) }
+                    Ok(()) => { log("O transmissor encerrou a transmissão."); Ok(()) }
                     Err(e) => Err(anyhow!("transmissão interrompida: {e:#}")),
                 };
             }
-            _ = child.wait() => { log("Player fechado."); break Ok(()); }
+            _ = child.wait() => { log("Janela de vídeo fechada."); break Ok(()); }
             _ = &mut control => {}
             _ = tick.tick() => {
                 let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
@@ -277,7 +277,7 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
             }
         }
     };
-    conn.close(0u32.into(), b"tchau");
+    conn.close(0u32.into(), b"desconectado");
     let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
     result
 }

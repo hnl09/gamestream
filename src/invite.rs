@@ -63,7 +63,7 @@ fn is_cgnat(v4: Ipv4Addr) -> bool {
     o[0] == 100 && (64..128).contains(&o[1])
 }
 
-/// Endereços deste PC por onde amigos podem chegar, com uma descrição de cada um.
+/// Endereços deste computador pelos quais os espectadores podem se conectar, com a descrição de cada um.
 pub fn local_addrs(port: u16) -> Vec<(SocketAddr, String)> {
     let mut out = Vec::new();
     for iface in if_addrs::get_if_addrs().unwrap_or_default() {
@@ -95,7 +95,7 @@ pub async fn map_port(port: u16) -> Result<(PortMapping, IpAddr)> {
     let opts = igd_next::SearchOptions { timeout: Some(Duration::from_secs(3)), ..Default::default() };
     let gw = igd_next::aio::tokio::search_gateway(opts)
         .await
-        .context("roteador não respondeu ao UPnP (desativado no modem?)")?;
+        .context("o roteador não respondeu ao UPnP (o recurso pode estar desativado no modem)")?;
     let local_ip = {
         let s = std::net::UdpSocket::bind("0.0.0.0:0")?;
         s.connect(gw.addr)?;
@@ -104,7 +104,7 @@ pub async fn map_port(port: u16) -> Result<(PortMapping, IpAddr)> {
     let local = SocketAddr::new(local_ip, port);
     let m = PortMapping { gw, local, port };
     m.renew().await?;
-    let ext = m.gw.get_external_ip().await.context("roteador não informou o IP externo")?;
+    let ext = m.gw.get_external_ip().await.context("o roteador não informou o IP externo")?;
     Ok((m, ext))
 }
 

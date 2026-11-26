@@ -40,7 +40,7 @@ pub static UPDATE: LazyLock<Mutex<UpdateState>> = LazyLock::new(|| Mutex::new(Up
 /// Progresso do download do FFmpeg (mostrado na tela de "Preparando").
 pub static FFMPEG_PROGRESS: LazyLock<Mutex<Option<f32>>> = LazyLock::new(|| Mutex::new(None));
 
-/// Endereços (dá para trocar por variáveis de ambiente para testar com um servidor local).
+/// Endereços (podem ser substituídos por variáveis de ambiente para testes com um servidor local).
 fn releases_api() -> String {
     std::env::var("GAMESTREAM_RELEASES_API")
         .unwrap_or_else(|_| format!("https://api.github.com/repos/{REPO}/releases/latest"))
@@ -79,9 +79,9 @@ pub fn check() -> Result<Option<Release>> {
     let body = match agent().get(&url).set("Accept", "application/vnd.github+json").call() {
         Ok(r) => r.into_string()?,
         Err(ureq::Error::Status(404, _)) => {
-            bail!("nenhuma release pública encontrada (o repositório precisa ser público para atualizar sozinho)")
+            bail!("nenhuma versão publicada encontrada")
         }
-        Err(e) => return Err(e).context("sem conexão com o GitHub"),
+        Err(e) => return Err(e).context("não foi possível conectar ao GitHub"),
     };
     let v: serde_json::Value = serde_json::from_str(&body)?;
     let tag = v["tag_name"].as_str().context("resposta inesperada do GitHub")?.to_string();
@@ -96,7 +96,7 @@ pub fn check() -> Result<Option<Release>> {
             .and_then(|a| a["browser_download_url"].as_str())
             .map(|s| s.to_string())
     };
-    let exe_url = find("gamestream.exe").context("a release nova não tem o gamestream.exe")?;
+    let exe_url = find("gamestream.exe").context("a nova versão não contém o gamestream.exe")?;
     Ok(Some(Release { tag, exe_url, exe_sha_url: find("gamestream.exe.sha256") }))
 }
 
@@ -106,7 +106,7 @@ pub fn check_in_background() {
         set_state(UpdateState::Checking);
         match check() {
             Ok(Some(r)) => {
-                log(format!("Atualização disponível: {} (você tem v{VERSION}).", r.tag));
+                log(format!("Atualização disponível: {} (versão instalada: v{VERSION}).", r.tag));
                 set_state(UpdateState::Available(r));
             }
             Ok(None) => set_state(UpdateState::UpToDate),
@@ -144,14 +144,14 @@ fn sha256_hex(data: &[u8]) -> String {
 
 fn verify(data: &[u8], sha_url: Option<&str>) -> Result<()> {
     let Some(url) = sha_url else {
-        log("[atualização] release sem arquivo .sha256; pulando verificação");
+        log("[atualização] versão sem arquivo .sha256; verificação de integridade ignorada");
         return Ok(());
     };
     let expected = String::from_utf8(download(url, |_| {})?)?;
     let expected = expected.split_whitespace().next().unwrap_or("").to_lowercase();
     let got = sha256_hex(data);
     if expected != got {
-        bail!("o arquivo baixado não confere (SHA-256 diferente). Atualização cancelada por segurança.");
+        bail!("falha na verificação de integridade (SHA-256). Atualização cancelada.");
     }
     Ok(())
 }
@@ -176,7 +176,7 @@ pub fn install(rel: &Release) -> Result<PathBuf> {
     let cur = std::env::current_exe()?;
     let dir = exe_dir()?;
     let new = dir.join("gamestream.new.exe");
-    std::fs::write(&new, &data).context("sem permissão para gravar na pasta do GameStream")?;
+    std::fs::write(&new, &data).context("sem permissão de gravação na pasta do GameStream")?;
     // O Windows deixa renomear um .exe em uso (mas não apagar).
     let old = dir.join("gamestream.old.exe");
     let _ = std::fs::remove_file(&old);
@@ -225,7 +225,7 @@ pub fn ensure_ffmpeg() -> Result<String> {
     if ffmpeg_works(Path::new("ffmpeg")) {
         return Ok("ffmpeg".into());
     }
-    log("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Só acontece na primeira transmissão...");
+    log("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Este download ocorre apenas uma vez.");
     *FFMPEG_PROGRESS.lock().unwrap() = Some(0.0);
     let r = (|| -> Result<String> {
         let (base, latest) = download_base();
@@ -234,13 +234,13 @@ pub fn ensure_ffmpeg() -> Result<String> {
                 // Versão sem release (ex.: compilada localmente): tenta a última release.
                 download(&format!("{latest}/ffmpeg.exe.gz"), |p| *FFMPEG_PROGRESS.lock().unwrap() = Some(p))
             })
-            .context("não consegui baixar o FFmpeg (o repositório do GameStream está público?)")?;
+            .context("não foi possível baixar o FFmpeg")?;
         let sha = download(&format!("{base}/ffmpeg.exe.gz.sha256"), |_| {})
             .or_else(|_| download(&format!("{latest}/ffmpeg.exe.gz.sha256"), |_| {}));
         if let Ok(sha) = sha {
             let expected = String::from_utf8_lossy(&sha).split_whitespace().next().unwrap_or("").to_lowercase();
             if expected != sha256_hex(&gz) {
-                bail!("o FFmpeg baixado não confere (SHA-256 diferente)");
+                bail!("falha na verificação de integridade do FFmpeg (SHA-256)");
             }
         }
         let mut exe = Vec::new();
@@ -248,7 +248,7 @@ pub fn ensure_ffmpeg() -> Result<String> {
         let tmp = dir.join("ffmpeg.exe.part");
         std::fs::File::create(&tmp)
             .and_then(|mut f| f.write_all(&exe))
-            .context("sem permissão para gravar na pasta do GameStream")?;
+            .context("sem permissão de gravação na pasta do GameStream")?;
         std::fs::rename(&tmp, &local)?;
         log("FFmpeg instalado.");
         Ok(local.to_string_lossy().into_owned())

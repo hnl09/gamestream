@@ -1,7 +1,7 @@
 -- GameStream: painel de controles dentro da janela do vídeo (mpv).
 --   * Scroll: zoom no ponto onde o mouse está (cima = aproxima, baixo = afasta).
 --   * Arrastar com o botão esquerdo (com zoom): move a imagem.
---   * Clique do meio / Backspace: volta ao tamanho normal.
+--   * Botão do meio / Backspace: restaura o tamanho original.
 --   * Duplo clique / F: tela cheia.
 --   * I: fixa as estatísticas (ping, FPS, perda, Mbps) no canto da tela.
 --   * Painel no canto inferior direito (aparece ao mexer o mouse): som, volume, zoom, tela cheia.
@@ -140,7 +140,7 @@ local function render(show)
     local H, pad, gap = 40, 10, 8
     local items = {}
     if has_audio then
-        items[#items + 1] = { id = "mute", w = 78, label = muted and "Ativar som" or "Mutar" }
+        items[#items + 1] = { id = "mute", w = 78, label = muted and "Ativar som" or "Silenciar" }
         items[#items + 1] = { id = "vol", w = 130 }
         items[#items + 1] = { id = "voltxt", w = 46 }
     end
@@ -188,7 +188,7 @@ local function render(show)
         above = above - 22
     end
     if zpct > 100 then
-        ass[#ass + 1] = text(x0 + total, above, "Arraste para mover  ·  clique do meio volta ao normal", 15, C_DIM, 6)
+        ass[#ass + 1] = text(x0 + total, above, "Arraste para mover  ·  botão do meio restaura", 15, C_DIM, 6)
     end
     overlay.data = table.concat(ass, "\n")
     overlay:update()

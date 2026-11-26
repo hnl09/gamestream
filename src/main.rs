@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gamestream", version, about = "Stream de jogos com baixa latência entre amigos (HEVC na GPU + QUIC)")]
+#[command(name = "gamestream", version, about = "Transmissão de vídeo e áudio com baixa latência (HEVC acelerado por GPU + QUIC)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -24,14 +24,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Transmite a sua tela (ou uma janela) + áudio
+    /// Inicia uma transmissão (monitor ou janela, com áudio)
     Host {
         #[arg(long, default_value_t = net::DEFAULT_PORT)]
         port: u16,
-        /// Bitrate em Mbps (fixo) ou o teto, com --auto
+        /// Bitrate em Mbps (fixo) ou máximo, com --auto
         #[arg(long, default_value_t = 20)]
         bitrate: u32,
-        /// Ajusta o bitrate sozinho conforme a internet dos viewers
+        /// Ajusta o bitrate automaticamente conforme a conexão dos espectadores
         #[arg(long)]
         auto: bool,
         #[arg(long, default_value_t = 60)]
@@ -39,7 +39,7 @@ enum Cmd {
         /// Número do monitor (1 = primeiro)
         #[arg(long, default_value_t = 1)]
         monitor: u32,
-        /// Transmite só a janela cujo título contém este texto
+        /// Transmite somente a janela cujo título contém este texto
         #[arg(long)]
         window: Option<String>,
         /// auto | amf | nvenc | qsv | cpu
@@ -47,11 +47,11 @@ enum Cmd {
         encoder: String,
         #[arg(long)]
         no_audio: bool,
-        /// Som a transmitir: game (só o jogo da janela) | no-discord (tudo menos o Discord, padrão) |
-        /// all (tudo) | app:NOME.exe | output:DISPOSITIVO | input:DISPOSITIVO
+        /// Fonte de áudio: game (aplicativo da janela) | no-discord (sistema exceto Discord, padrão) |
+        /// all (todo o sistema) | app:NOME.exe | output:DISPOSITIVO | input:DISPOSITIVO
         #[arg(long, default_value = "auto")]
         audio: String,
-        /// Mistura o microfone (nome do dispositivo de entrada). Deixe sem se estiver em call no Discord.
+        /// Inclui o microfone (nome do dispositivo de entrada). Não use durante chamadas no Discord.
         #[arg(long)]
         mic: Option<String>,
         #[arg(long)]
@@ -61,25 +61,25 @@ enum Cmd {
         #[arg(long, default_value = "ffmpeg")]
         ffmpeg: String,
     },
-    /// Assiste a transmissão de alguém
+    /// Conecta a uma transmissão
     View {
-        /// Convite GS-... ou IP do host
+        /// Convite GS-... ou endereço IP do transmissor
         invite: String,
         #[arg(long)]
         password: Option<String>,
         #[arg(long)]
         mpv: Option<String>,
-        /// Saída de áudio onde tocar o som (padrão do Windows se omitido)
+        /// Dispositivo de saída de áudio (padrão do Windows se omitido)
         #[arg(long)]
         audio_out: Option<String>,
     },
-    /// Lista monitores e janelas que podem ser transmitidos
+    /// Lista monitores, janelas e dispositivos de áudio disponíveis
     Sources,
-    /// Verifica e instala a versão mais nova do GameStream
+    /// Verifica e instala a versão mais recente do GameStream
     Update,
-    /// Garante o FFmpeg (baixa se não houver) e mostra qual será usado
+    /// Verifica o FFmpeg (faz o download se necessário) e exibe o caminho utilizado
     Ffmpeg,
-    /// Testa a captura de áudio: mostra o nível do som capturado por alguns segundos
+    /// Testa a captura de áudio, exibindo o nível medido por alguns segundos
     AudioTest {
         /// Mesmo formato do --audio do host
         #[arg(long, default_value = "no-discord")]
@@ -141,24 +141,24 @@ fn cli() -> Result<()> {
             for d in audio::input_devices() {
                 println!("  {d}");
             }
-            println!("Programas tocando som agora (--audio app:NOME):");
+            println!("Aplicativos com áudio ativo (--audio app:NOME):");
             for (pid, n) in procaudio::audio_apps() {
                 println!("  {n}  (pid {pid})");
             }
             match procaudio::discord_root_pid() {
-                Some(p) => println!("Discord aberto (pid {p}): --audio no-discord exclui ele."),
-                None => println!("Discord não está aberto."),
+                Some(p) => println!("Discord em execução (pid {p}): --audio no-discord o exclui da captura."),
+                None => println!("Discord não está em execução."),
             }
             Ok(())
         }
         Cmd::Update => {
             println!("Versão atual: v{}", updater::VERSION);
             match updater::check()? {
-                None => println!("Você já está na versão mais nova."),
+                None => println!("O GameStream já está na versão mais recente."),
                 Some(rel) => {
                     println!("Baixando {}...", rel.tag);
                     updater::install(&rel)?;
-                    println!("Pronto! Abra o GameStream de novo para usar a versão {}.", rel.tag);
+                    println!("Atualização concluída. Reinicie o GameStream para usar a versão {}.", rel.tag);
                 }
             }
             Ok(())
@@ -178,8 +178,8 @@ fn cli() -> Result<()> {
             };
             let (src, desc) = if let Some(name) = a.strip_prefix("except:") {
                 // Diagnóstico: tudo menos um programa qualquer (o mesmo mecanismo do "menos o Discord").
-                let pid = procaudio::pid_by_exe(name).with_context(|| format!("{name} não está rodando"))?;
-                (audio::CaptureSource::ProcessExcept(pid), format!("tudo menos {name}"))
+                let pid = procaudio::pid_by_exe(name).with_context(|| format!("{name} não está em execução"))?;
+                (audio::CaptureSource::ProcessExcept(pid), format!("todo o áudio, exceto {name}"))
             } else {
                 let sel = parse_audio(&a, matches!(source, sources::Source::Window { .. }))?;
                 host::resolve_audio_sel(&sel, &source)

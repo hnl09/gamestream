@@ -143,7 +143,7 @@ pub fn resolve(src: &Source) -> Result<Capture> {
             let m = mons
                 .iter()
                 .find(|m| cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h)
-                .context("a janela está fora dos monitores do adaptador principal")?;
+                .context("a janela não está em um monitor do adaptador de vídeo principal")?;
             let ox = (p.x - m.x).max(0);
             let oy = (p.y - m.y).max(0);
             let cw = w.min(m.w - ox) & !1; // HEVC precisa de dimensões pares

@@ -156,7 +156,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
             let fp: [u8; 32] = Sha256::digest(end_entity.as_ref()).into();
             if fp != pin {
                 return Err(rustls::Error::General(
-                    "a identidade do host não confere com o convite (possível interceptação!)".into(),
+                    "a identidade do transmissor não corresponde ao convite (possível interceptação)".into(),
                 ));
             }
         }

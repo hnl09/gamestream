@@ -1,5 +1,5 @@
 # Compila e monta os mesmos arquivos que a release do GitHub publica (pasta out\):
-#   GameStream.zip            app + player (sem FFmpeg) - é o que os amigos baixam
+#   GameStream.zip            app + player (sem FFmpeg) - pacote distribuído aos usuários
 #   gamestream.exe (+.sha256) usado pela atualização automática
 #   ffmpeg.exe.gz (+.sha256)  baixado pelo app na primeira transmissão
 # Também deixa em dist\ uma cópia pronta para testar (com o ffmpeg.exe local, se houver).

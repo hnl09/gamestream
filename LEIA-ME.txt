@@ -1,114 +1,153 @@
-GAMESTREAM - como usar
-======================
+GAMESTREAM - GUIA DE USO
+========================
 
-Abra o gamestream.exe com dois cliques. Tem duas abas:
-
-TRANSMITIR
-  1. Escolha "Monitor inteiro" (e qual monitor) ou "Só a janela do jogo".
-     A janela é capturada direto pelo Windows: pode mover, redimensionar
-     ou deixar outra janela por cima que a transmissão continua igual.
-     "Ver minha transmissão" abre uma prévia sem som (como no Discord).
-  2. Áudio - o que os amigos vão ouvir:
-       - Só o som do jogo (modo janela): Discord, navegador e notificações
-         ficam de fora.
-       - Tudo do PC, menos o Discord (modo monitor): quem está na call não
-         ouve a própria voz de volta.
-       - Só um programa, ou tudo de uma saída (esta inclui o Discord).
-     Microfone: deixe DESLIGADO se vocês estiverem conversando no Discord
-     (senão os amigos ouvem sua voz duas vezes).
-  3. Qualidade: "Automático" (recomendado) ou "Fixo". Veja o guia abaixo.
-  4. Coloque uma senha e clique em "Iniciar transmissão".
-     Na primeira vez o app baixa o encoder de vídeo (FFmpeg, ~90 MB).
-  5. O convite (GS-...) já vai para a área de transferência: é só dar
-     Ctrl+V no Discord. Mande a senha separada.
-
-ASSISTIR
-  1. Cole o convite GS-... e a senha. Escolha onde tocar o som.
-  2. Clique em "Conectar". O vídeo abre numa janela separada.
-  3. Dentro da janela do vídeo:
-       - Mexa o mouse: aparece o painel no canto inferior direito
-         (mutar, volume, zoom, tela cheia).
-       - Scroll: zoom onde o mouse aponta (cima aproxima, baixo volta).
-       - Arrastar: move a imagem quando tem zoom.
-       - Clique do meio: volta ao normal.   Duplo clique / F: tela cheia.
-       - M = mutar, 9 / 0 = baixar / aumentar volume.
-       - Acima do painel: ping, FPS, perda de pacotes e Mbps.
-         I (ou o botão "i") deixa esses números fixos no canto.
-     Com captura de janela, o FPS cai quando a janela fica parada (o Windows
-     só manda imagem nova quando algo muda); em jogo ele fica normal.
-
-ATUALIZAÇÕES
-  Quando sair uma versão nova, aparece o botão "Atualizar" no topo do app.
-  Um clique baixa, confere (SHA-256) e reinicia. Pelo terminal:
-  gamestream update
+O GameStream transmite vídeo e áudio com baixa latência entre computadores
+Windows. Abra o gamestream.exe; a interface possui duas abas: Transmitir e
+Assistir.
 
 ------------------------------------------------------------
-GUIA DE BITRATE (qualidade x internet)
+TRANSMITIR
+------------------------------------------------------------
+  1. Fonte de vídeo
+       - Monitor: transmite um monitor completo.
+       - Janela específica: transmite apenas a janela selecionada. A captura é
+         feita diretamente pelo Windows; a janela pode ser movida,
+         redimensionada ou sobreposta sem interromper a transmissão. Evite
+         minimizá-la.
+       - "Exibir pré-visualização" abre uma janela local, sem áudio, com a
+         mesma imagem recebida pelos espectadores.
+
+  2. Fonte de áudio
+       - Aplicativo transmitido (padrão no modo janela): somente o áudio da
+         janela selecionada. Discord, navegador e notificações não são
+         incluídos.
+       - Áudio do sistema, exceto Discord (padrão no modo monitor): evita que
+         participantes de uma chamada de voz ouçam o retorno das próprias
+         vozes.
+       - Aplicativo específico, dispositivo de saída (inclui o Discord) ou
+         dispositivo de entrada.
+     Microfone: mantenha desativado durante chamadas no Discord; caso
+     contrário, sua voz será reproduzida em duplicidade.
+
+  3. Qualidade: "Automático" (recomendado) ou "Fixo". Consulte o guia de
+     bitrate abaixo.
+
+  4. Defina uma senha e clique em "Iniciar transmissão".
+     Na primeira transmissão, o aplicativo faz o download do encoder de vídeo
+     (FFmpeg, aproximadamente 90 MB).
+
+  5. O convite (GS-...) é copiado automaticamente para a área de
+     transferência. Compartilhe-o com os espectadores e envie a senha por um
+     canal separado.
+
+------------------------------------------------------------
+ASSISTIR
+------------------------------------------------------------
+  1. Cole o convite GS-..., informe a senha e selecione a saída de áudio.
+  2. Clique em "Conectar". O vídeo é exibido em uma janela própria.
+  3. Controles na janela de vídeo:
+       - Mover o mouse: exibe o painel no canto inferior direito (silenciar,
+         volume, zoom e tela cheia).
+       - Roda do mouse: zoom a partir da posição do cursor (para cima amplia,
+         para baixo reduz).
+       - Arrastar: com zoom ativo, desloca a imagem.
+       - Botão do meio: restaura o tamanho original.
+       - Duplo clique ou F: tela cheia.
+       - M: silenciar.  9 / 0: diminuir / aumentar o volume.
+       - Estatísticas (ping, FPS, perda de pacotes e taxa recebida) são
+         exibidas acima do painel. A tecla I (ou o botão "i") as fixa no
+         canto da tela.
+     Observação: na captura de janela, o FPS diminui quando o conteúdo da
+     janela não muda, pois o Windows só envia novos quadros quando há
+     alteração. Em jogos, a taxa permanece normal.
+
+------------------------------------------------------------
+ATUALIZAÇÕES
+------------------------------------------------------------
+  Quando houver uma nova versão, o botão "Atualizar" aparece no topo do
+  aplicativo. A atualização é baixada, verificada (SHA-256) e aplicada com
+  reinício automático. Também é possível atualizar pelo terminal:
+      gamestream update
+
+------------------------------------------------------------
+GUIA DE BITRATE
 ------------------------------------------------------------
   Mbps     Qualidade esperada (HEVC)
-  3-5      720p ok; 1080p borra em movimento rápido
+  3-5      720p adequado; 1080p perde nitidez em movimentos rápidos
   8-10     1080p60 boa
   15       1080p60 muito boa (recomendado)
   20-25    1080p excelente / 1440p60 boa / ultrawide boa
   30-40    1440p excelente / 4K60 boa
-  50-60    4K excelente (ideal só em rede local)
+  50-60    4K excelente (recomendado apenas em rede local)
 
-  Cada amigo precisa de DOWNLOAD >= bitrate + 30%.
-  Quem transmite precisa de UPLOAD >= bitrate x número de amigos + 20%.
-    Ex.: 15 Mbps para 4 amigos -> 72 Mbps de upload.
+  Download mínimo por espectador: bitrate + 30%.
+  Upload mínimo do transmissor: bitrate x número de espectadores + 20%.
+    Exemplo: 15 Mbps para 4 espectadores = 72 Mbps de upload.
 
-  Automático: o valor escolhido vira o TETO. Começa em 70% dele, cai 30% quando
-  alguém perde pacotes ou trava, e sobe 15% a cada 20 s de conexão estável.
-  Todos recebem o mesmo vídeo, então o ajuste segue a internet mais fraca.
+  Modo automático: o valor selecionado é o limite máximo. A transmissão inicia
+  em 70% desse valor, reduz 30% quando há perda de pacotes ou atraso e aumenta
+  15% a cada 20 segundos de conexão estável. Como todos os espectadores
+  recebem o mesmo vídeo, o ajuste acompanha a conexão mais lenta.
 
 ------------------------------------------------------------
-CONEXÃO PELA INTERNET (sem mexer no modem)
+CONEXÃO PELA INTERNET
 ------------------------------------------------------------
-O convite já inclui todos os caminhos possíveis; quem assiste tenta todos ao
-mesmo tempo e usa o primeiro que funcionar.
+  O convite contém todos os endereços disponíveis; o aplicativo do espectador
+  testa todos simultaneamente e utiliza o primeiro que responder.
 
-  1) IPv6 - a Vivo e a maioria das operadoras já dão IPv6. Se você e o amigo
-     tiverem IPv6, costuma funcionar sem configurar nada. (Alguns modens
-     bloqueiam conexões de entrada por IPv6; aí use a opção 3.)
-  2) UPnP - o app tenta abrir a porta UDP 9000 sozinho. Só funciona se o
-     UPnP estiver ligado no modem e não houver CGNAT.
-  3) VPN de jogos (funciona SEMPRE, inclusive com CGNAT):
-       - Tailscale (tailscale.com) ou Radmin VPN (radmin-vpn.com), grátis.
-       - Todos instalam e entram na mesma rede. Abra o GameStream depois de
-         conectar na VPN: o IP da VPN entra no convite automaticamente.
-  4) Redirecionar a porta UDP 9000 no roteador (se tiver acesso).
+  1) IPv6: a maioria das operadoras já oferece IPv6. Se transmissor e
+     espectador tiverem IPv6, a conexão normalmente funciona sem configuração.
+     Alguns modems bloqueiam conexões IPv6 de entrada; nesse caso, utilize a
+     opção 3.
+  2) UPnP: o aplicativo solicita automaticamente a abertura da porta UDP 9000.
+     Requer UPnP ativado no modem e ausência de CGNAT.
+  3) VPN (funciona em qualquer cenário, inclusive com CGNAT):
+       - Tailscale (tailscale.com) ou Radmin VPN (radmin-vpn.com).
+       - Todos os participantes devem estar na mesma rede virtual. Inicie o
+         GameStream após conectar-se à VPN; o endereço da VPN é incluído no
+         convite automaticamente.
+  4) Redirecionamento manual da porta UDP 9000 no roteador.
 
-Na primeira vez, o Windows pergunta sobre o Firewall: clique em "Permitir".
+  Na primeira execução, o Firewall do Windows solicitará permissão de acesso
+  à rede: selecione "Permitir".
 
 ------------------------------------------------------------
 SEGURANÇA
 ------------------------------------------------------------
-- Tudo (vídeo, áudio, senha) trafega criptografado (QUIC + TLS 1.3). Quem
-  "sniffar" a rede vê só bytes embaralhados.
-- Contra "man-in-the-middle": o convite carrega a impressão digital do
-  certificado do host. Se alguém no meio do caminho tentar se passar pelo
-  host, a conexão é recusada ("a identidade do host não confere").
-- O host e quem assiste veem o mesmo "código de segurança" (ex.:
-  E5A8-8126-47BF). Confiram por voz se quiserem ter certeza.
-- Mande o convite por um canal confiável (DM). Quem tem o convite + a senha
-  consegue assistir.
-- Conectando por IP puro (sem convite) a identidade não é verificada, e por
-  isso o app se recusa a enviar a senha nesse modo.
-- Senha errada leva 1 segundo de espera, para frear tentativas de adivinhar.
-- Assim como em qualquer conexão direta, o seu IP fica visível para quem
-  conecta. Use uma VPN (opção 3 acima) se não quiser expor o IP.
+  - Todo o tráfego (vídeo, áudio e senha) é criptografado com QUIC e
+    TLS 1.3.
+  - Proteção contra interceptação (man-in-the-middle): o convite contém a
+    impressão digital do certificado do transmissor. Se outro computador
+    tentar se passar pelo transmissor, a conexão é recusada.
+  - Transmissor e espectadores visualizam o mesmo código de segurança
+    (ex.: E5A8-8126-47BF), que pode ser conferido para confirmar a conexão.
+  - Compartilhe o convite por um canal confiável. O convite e a senha,
+    juntos, permitem o acesso à transmissão.
+  - Em conexões por endereço IP (sem convite), a identidade do transmissor
+    não pode ser verificada; por isso, a senha não é enviada nesse modo.
+  - Cada tentativa com senha incorreta é atrasada em 1 segundo, dificultando
+    tentativas sucessivas.
+  - Como em qualquer conexão direta, o endereço IP do transmissor fica
+    visível para os espectadores. Utilize uma VPN (opção 3 acima) para não
+    expô-lo.
 
 ------------------------------------------------------------
 ARQUIVOS
-- gamestream.exe + mpv.exe + vulkan-1.dll (é o que vem no zip).
-- ffmpeg.exe: baixado sozinho na primeira transmissão (só quem transmite precisa).
-- Placa AMD, NVIDIA ou Intel: o encoder é escolhido sozinho.
+------------------------------------------------------------
+  - gamestream.exe, mpv.exe e vulkan-1.dll: incluídos no pacote.
+  - ffmpeg.exe: obtido automaticamente na primeira transmissão (necessário
+    apenas para transmitir).
+  - Placas de vídeo AMD, NVIDIA e Intel são suportadas; o encoder é
+    selecionado automaticamente.
 
+------------------------------------------------------------
 LINHA DE COMANDO (opcional)
+------------------------------------------------------------
   gamestream sources
-  gamestream host --auto --bitrate 25 --password minhasenha
-  gamestream host --window "Elden Ring" --bitrate 15 --audio game
-  gamestream host --audio no-discord --mic "Fifine Mic (fifine Microphone)"
-  gamestream audio-test --audio no-discord      (mede o som capturado)
+  gamestream host --auto --bitrate 25 --password SENHA
+  gamestream host --window "Nome da janela" --bitrate 15 --audio game
+  gamestream host --audio no-discord --mic "Nome do microfone"
   gamestream host --monitor 2 --fps 120
-  gamestream view GS-xxxx --password minhasenha
+  gamestream audio-test --audio no-discord
+  gamestream view GS-xxxx --password SENHA
+  gamestream update

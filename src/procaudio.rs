@@ -1,6 +1,6 @@
 //! Captura de áudio por processo (Windows 10 2004+ / Windows 11): "process loopback" do WASAPI.
 //! Permite gravar só o som de um programa (e dos processos filhos), ou tudo MENOS um programa
-//! (ex.: tudo menos o Discord, para os amigos não ouvirem a própria voz de volta).
+//! (ex.: todo o áudio exceto o Discord, evitando o retorno de voz para participantes da chamada).
 
 use std::{
     collections::HashMap,
@@ -178,11 +178,11 @@ unsafe fn activate(pid: u32, include: bool) -> Result<IAudioClient> {
         Some(&pv as *const BlobPropVariant as *const _),
         &handler,
     )?;
-    rx.recv_timeout(Duration::from_secs(5)).context("o Windows não respondeu à captura por processo")?;
+    rx.recv_timeout(Duration::from_secs(5)).context("o Windows não respondeu à solicitação de captura por aplicativo")?;
     let mut hr = HRESULT(0);
     let mut unk: Option<IUnknown> = None;
     op.GetActivateResult(&mut hr, &mut unk)?;
-    hr.ok().context("captura por processo recusada (precisa do Windows 10 2004 ou mais novo)")?;
+    hr.ok().context("captura por aplicativo não suportada (requer Windows 10 versão 2004 ou superior)")?;
     Ok(unk.context("captura por processo sem interface")?.cast()?)
 }
 

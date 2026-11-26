@@ -34,7 +34,7 @@ fn gain() -> f32 {
 pub enum AudioSel {
     /// Só o som do jogo (processo da janela transmitida).
     GameWindow,
-    /// Tudo que toca no PC, menos o Discord (para os amigos não ouvirem a própria voz de volta).
+    /// Todo o áudio do sistema, exceto o Discord (evita o retorno de voz para participantes da chamada).
     AllExceptDiscord,
     /// Só o som de um programa.
     App { pid: u32, name: String },
@@ -49,11 +49,11 @@ pub enum AudioSel {
 impl AudioSel {
     pub fn label(&self) -> String {
         match self {
-            AudioSel::GameWindow => "🎮 Só o som do jogo (da janela transmitida)".into(),
-            AudioSel::AllExceptDiscord => "Tudo do PC, menos o Discord".into(),
-            AudioSel::App { name, .. } => format!("Só o programa: {name}"),
-            AudioSel::DefaultOutput => "🔊 Tudo do PC (inclui o Discord)".into(),
-            AudioSel::Output(n) => format!("🔊 Tudo que toca em: {n}"),
+            AudioSel::GameWindow => "🎮 Aplicativo transmitido (somente o áudio da janela)".into(),
+            AudioSel::AllExceptDiscord => "Áudio do sistema, exceto Discord".into(),
+            AudioSel::App { name, .. } => format!("Aplicativo: {name}"),
+            AudioSel::DefaultOutput => "🔊 Áudio do sistema (inclui Discord)".into(),
+            AudioSel::Output(n) => format!("🔊 Saída: {n}"),
             AudioSel::Input(n) => format!("🎤 Entrada: {n}"),
         }
     }
