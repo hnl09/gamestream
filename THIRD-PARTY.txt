@@ -1,0 +1,15 @@
+Componentes de terceiros distribuídos junto com o GameStream
+============================================================
+
+ffmpeg.exe
+  FFmpeg - https://ffmpeg.org
+  Build: BtbN/FFmpeg-Builds (win64-gpl) - https://github.com/BtbN/FFmpeg-Builds
+  Licença: GNU GPL v3. Código-fonte: https://ffmpeg.org/download.html
+  e https://github.com/BtbN/FFmpeg-Builds
+
+mpv.exe, vulkan-1.dll
+  mpv - https://mpv.io
+  Build oficial: https://github.com/mpv-player/mpv/releases
+  Licença: GNU GPL v2+. Código-fonte: https://github.com/mpv-player/mpv
+
+O GameStream executa esses programas como processos separados.

@@ -1,0 +1,85 @@
+GAMESTREAM - como usar
+======================
+
+Abra o gamestream.exe com dois cliques. Tem duas abas:
+
+TRANSMITIR
+  1. Escolha "Monitor inteiro" (e qual monitor) ou "Só uma janela / jogo".
+  2. Qualidade: "Automático" (recomendado) ou "Fixo". Veja o guia abaixo.
+  3. Coloque uma senha.
+  4. Clique em "Iniciar transmissão" e depois em "Copiar convite".
+  5. Mande o convite (GS-...) e a senha para os amigos por DM.
+
+ASSISTIR
+  1. Cole o convite GS-... e a senha.
+  2. Clique em "Conectar". O vídeo abre numa janela separada (F = tela cheia).
+
+------------------------------------------------------------
+GUIA DE BITRATE (qualidade x internet)
+------------------------------------------------------------
+  Mbps     Qualidade esperada (HEVC)
+  3-5      720p ok; 1080p borra em movimento rápido
+  8-10     1080p60 boa
+  15       1080p60 muito boa (recomendado)
+  20-25    1080p excelente / 1440p60 boa / ultrawide boa
+  30-40    1440p excelente / 4K60 boa
+  50-60    4K excelente (ideal só em rede local)
+
+  Cada amigo precisa de DOWNLOAD >= bitrate + 30%.
+  Quem transmite precisa de UPLOAD >= bitrate x número de amigos + 20%.
+    Ex.: 15 Mbps para 4 amigos -> 72 Mbps de upload.
+
+  Automático: o valor escolhido vira o TETO. Começa em 70% dele, cai 30% quando
+  alguém perde pacotes ou trava, e sobe 15% a cada 20 s de conexão estável.
+  Todos recebem o mesmo vídeo, então o ajuste segue a internet mais fraca.
+
+------------------------------------------------------------
+CONEXÃO PELA INTERNET (sem mexer no modem)
+------------------------------------------------------------
+O convite já inclui todos os caminhos possíveis; quem assiste tenta todos ao
+mesmo tempo e usa o primeiro que funcionar.
+
+  1) IPv6 - a Vivo e a maioria das operadoras já dão IPv6. Se você e o amigo
+     tiverem IPv6, costuma funcionar sem configurar nada. (Alguns modens
+     bloqueiam conexões de entrada por IPv6; aí use a opção 3.)
+  2) UPnP - o app tenta abrir a porta UDP 9000 sozinho. Só funciona se o
+     UPnP estiver ligado no modem e não houver CGNAT.
+  3) VPN de jogos (funciona SEMPRE, inclusive com CGNAT):
+       - Tailscale (tailscale.com) ou Radmin VPN (radmin-vpn.com), grátis.
+       - Todos instalam e entram na mesma rede. Abra o GameStream depois de
+         conectar na VPN: o IP da VPN entra no convite automaticamente.
+  4) Redirecionar a porta UDP 9000 no roteador (se tiver acesso).
+
+Na primeira vez, o Windows pergunta sobre o Firewall: clique em "Permitir".
+
+------------------------------------------------------------
+SEGURANÇA
+------------------------------------------------------------
+- Tudo (vídeo, áudio, senha) trafega criptografado (QUIC + TLS 1.3). Quem
+  "sniffar" a rede vê só bytes embaralhados.
+- Contra "man-in-the-middle": o convite carrega a impressão digital do
+  certificado do host. Se alguém no meio do caminho tentar se passar pelo
+  host, a conexão é recusada ("a identidade do host não confere").
+- O host e quem assiste veem o mesmo "código de segurança" (ex.:
+  E5A8-8126-47BF). Confiram por voz se quiserem ter certeza.
+- Mande o convite por um canal confiável (DM). Quem tem o convite + a senha
+  consegue assistir.
+- Conectando por IP puro (sem convite) a identidade não é verificada, e por
+  isso o app se recusa a enviar a senha nesse modo.
+- Senha errada leva 1 segundo de espera, para frear tentativas de adivinhar.
+- Assim como em qualquer conexão direta, o seu IP fica visível para quem
+  conecta. Use uma VPN (opção 3 acima) se não quiser expor o IP.
+
+------------------------------------------------------------
+ARQUIVOS
+------------------------------------------------------------
+- Para assistir: gamestream.exe + mpv.exe + vulkan-1.dll
+- Para transmitir: também o ffmpeg.exe
+- Placa AMD, NVIDIA ou Intel: o encoder é escolhido sozinho.
+
+LINHA DE COMANDO (opcional)
+  gamestream sources
+  gamestream host --auto --bitrate 25 --password minhasenha
+  gamestream host --window "Elden Ring" --bitrate 15
+  gamestream host --monitor 2 --fps 120
+  gamestream view GS-xxxx --password minhasenha
