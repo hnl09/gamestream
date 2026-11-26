@@ -238,10 +238,46 @@ fn find_vps(b: &[u8]) -> Option<usize> {
     None
 }
 
-/// Mantém o FFmpeg rodando; reinicia com o novo bitrate quando o controle automático mudar.
+/// Acompanha a janela transmitida: se ela mudar de lugar, tamanho ou monitor, publica o novo recorte
+/// (só depois que parar de mexer, para não reiniciar o encoder a cada pixel do arraste).
+async fn track_window(source: Source, mut current: Capture, cap_tx: watch::Sender<Capture>) {
+    let Source::Window { title, .. } = &source else {
+        return std::future::pending().await;
+    };
+    let mut pending: Option<Capture> = None;
+    let mut warned = false;
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        match sources::resolve(&source) {
+            Ok(c) if c != current => {
+                warned = false;
+                if pending.as_ref() == Some(&c) {
+                    // Parou de mexer: aplica.
+                    log(format!("[janela] \"{title}\" mudou de posição/tamanho, acompanhando."));
+                    current = c.clone();
+                    let _ = cap_tx.send(c);
+                    pending = None;
+                } else {
+                    pending = Some(c);
+                }
+            }
+            Ok(_) => pending = None,
+            Err(e) => {
+                // Minimizada/fechada: mantém o último recorte e avisa uma vez.
+                if !warned {
+                    log(format!("[janela] {e:#}"));
+                    warned = true;
+                }
+            }
+        }
+    }
+}
+
+/// Mantém o FFmpeg rodando; reinicia quando o bitrate (modo automático) ou o recorte da janela mudarem.
+#[allow(clippy::too_many_arguments)]
 async fn encoder_loop(
     o: &HostOpts,
-    cap: &Capture,
+    mut cap_rx: watch::Receiver<Capture>,
     enc: Enc,
     cpu_copy: bool,
     mut br_rx: watch::Receiver<u32>,
@@ -250,8 +286,9 @@ async fn encoder_loop(
 ) -> Result<()> {
     loop {
         let br = *br_rx.borrow_and_update();
+        let cap = cap_rx.borrow_and_update().clone();
         let mut child = Command::new(&o.ffmpeg)
-            .args(ffmpeg_args(o, cap, enc, cpu_copy, br, false))
+            .args(ffmpeg_args(o, &cap, enc, cpu_copy, br, false))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -282,6 +319,9 @@ async fn encoder_loop(
         tokio::select! {
             r = read => return r,
             _ = br_rx.changed() => {
+                let _ = child.kill().await;
+            }
+            _ = cap_rx.changed() => {
                 let _ = child.kill().await;
             }
         }
@@ -474,7 +514,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let bytes_out = Arc::new(AtomicU64::new(0));
     let (br_tx, br_rx) = watch::channel(start_br);
 
-    let encoder = encoder_loop(&o, &cap, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone());
+    let (cap_tx, cap_rx) = watch::channel(cap.clone());
+    let tracker = track_window(o.source.clone(), cap.clone(), cap_tx);
+    let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone());
     let vtx_preview = vtx.clone();
 
     let controller = async {
@@ -533,6 +575,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let res = tokio::select! {
         r = encoder => r,
         _ = preview => Ok(()),
+        _ = tracker => Ok(()),
         _ = accept => Ok(()),
         _ = stats => Ok(()),
         _ = controller => Ok(()),

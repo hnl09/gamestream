@@ -46,6 +46,7 @@ pub struct WindowInfo {
     pub title: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Capture {
     pub output_idx: u32,
     /// (offset_x, offset_y, largura, altura) dentro do monitor.
