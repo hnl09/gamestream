@@ -1,8 +1,8 @@
-﻿[package]
+[package]
 name = "gamestream"
 version = "0.3.0"
 edition = "2021"
-description = "Stream de jogos com baixa latÃªncia: host (captura + encoder HEVC na GPU) e viewer nativo, via QUIC"
+description = "Stream de jogos com baixa latência: host (captura + encoder HEVC na GPU) e viewer nativo, via QUIC"
 
 [dependencies]
 anyhow = "1"
