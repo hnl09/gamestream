@@ -58,6 +58,28 @@ pub async fn decode(input: &str, default_port: u16) -> Result<Invite> {
     Ok(Invite { addrs, fingerprint: None })
 }
 
+/// Código de resposta do espectador (GS-R-...): endereços do espectador para o transmissor liberar.
+pub fn encode_reply(addrs: &[SocketAddr]) -> String {
+    let list: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
+    format!("GS-R-{}", B64.encode(list.join(",")))
+}
+
+pub fn decode_reply(input: &str) -> Result<Vec<SocketAddr>> {
+    let t: String = input.chars().filter(|c| !c.is_whitespace() && *c != '\u{feff}').collect();
+    let b = t.strip_prefix("GS-R-").context("código de resposta inválido (deve começar com GS-R-)")?;
+    let raw = String::from_utf8(B64.decode(b).context("código de resposta inválido")?).context("código de resposta inválido")?;
+    let addrs = raw
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<SocketAddr>())
+        .collect::<Result<Vec<_>, _>>()
+        .context("código de resposta inválido")?;
+    if addrs.is_empty() || addrs.len() > 16 {
+        bail!("código de resposta inválido");
+    }
+    Ok(addrs)
+}
+
 fn is_cgnat(v4: Ipv4Addr) -> bool {
     let o = v4.octets();
     o[0] == 100 && (64..128).contains(&o[1])

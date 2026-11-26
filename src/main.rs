@@ -101,9 +101,14 @@ fn main() {
     }
     if std::env::args().len() > 1 {
         // Rodando pelo terminal: reaproveita o console de quem chamou.
+        // Só se a entrada/saída não estiverem redirecionadas (pipe/arquivo): anexar ao console
+        // nesse caso trocaria os handles redirecionados pelos do console.
         unsafe {
-            use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+            use windows::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE};
+            let redirected = GetStdHandle(STD_OUTPUT_HANDLE).is_ok_and(|h| !h.is_invalid() && !h.0.is_null());
+            if !redirected {
+                let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+            }
         }
         if let Err(e) = cli() {
             eprintln!("Erro: {e:#}");
@@ -229,6 +234,20 @@ fn cli() -> Result<()> {
                 upnp: !no_upnp,
                 ffmpeg,
             };
+            // Códigos de resposta (GS-R-...) colados no terminal liberam espectadores.
+            std::thread::spawn(|| {
+                let mut line = String::new();
+                while std::io::stdin().read_line(&mut line).is_ok_and(|n| n > 0) {
+                    // Alguns terminais/programas enviam um BOM (U+FEFF) no início da entrada.
+                    let code = line.trim().trim_start_matches('\u{feff}');
+                    if code.starts_with("GS-R-") {
+                        if let Err(e) = host::release_viewer(code) {
+                            state::log(format!("Código de resposta: {e:#}"));
+                        }
+                    }
+                    line.clear();
+                }
+            });
             // Erros já aparecem no log; só sinaliza o código de saída.
             if rt.block_on(host::run(opts, ctrl_c)).is_err() {
                 std::process::exit(1);

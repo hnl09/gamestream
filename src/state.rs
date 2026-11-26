@@ -37,6 +37,8 @@ pub struct ViewStatus {
     pub code: String,
     pub verified: bool,
     pub stats: ViewStats,
+    /// Código de resposta (GS-R-...) exibido quando a conexão direta não responde.
+    pub reply_code: Option<String>,
 }
 
 /// Números da transmissão para quem assiste (atualizados a cada segundo).

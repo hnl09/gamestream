@@ -72,13 +72,39 @@ fn bind_dual(port: u16) -> Result<std::net::UdpSocket> {
     Ok(sock)
 }
 
-pub fn server_endpoint(port: u16, id: &Identity) -> Result<Endpoint> {
+/// Endpoint do transmissor e uma cópia do mesmo socket UDP, usada para "hole punching":
+/// enviar pacotes a partir da porta do servidor abre o firewall/NAT do transmissor para o espectador.
+pub fn server_endpoint(port: u16, id: &Identity) -> Result<(Endpoint, std::net::UdpSocket)> {
     let mut cfg = ServerConfig::with_single_cert(
         vec![CertificateDer::from(id.cert.clone())],
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(id.key.clone())),
     )?;
     cfg.transport_config(transport());
-    Ok(Endpoint::new(EndpointConfig::default(), Some(cfg), bind_dual(port)?, Arc::new(quinn::TokioRuntime))?)
+    let sock = bind_dual(port)?;
+    let punch = sock.try_clone()?;
+    let ep = Endpoint::new(EndpointConfig::default(), Some(cfg), sock, Arc::new(quinn::TokioRuntime))?;
+    Ok((ep, punch))
+}
+
+/// Envia pacotes curtos ao espectador por alguns segundos, a partir da porta do servidor.
+/// Os pacotes não são QUIC válidos (o espectador os descarta); servem só para que o firewall do
+/// transmissor passe a aceitar os pacotes que vêm daquele endereço.
+pub async fn punch(sock: &std::net::UdpSocket, targets: &[SocketAddr]) {
+    let v6 = sock.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+    let targets: Vec<SocketAddr> = targets
+        .iter()
+        .filter_map(|t| match (v6, t) {
+            (true, SocketAddr::V4(a)) => Some(SocketAddr::new(a.ip().to_ipv6_mapped().into(), a.port())),
+            (false, SocketAddr::V6(_)) => None,
+            _ => Some(*t),
+        })
+        .collect();
+    for _ in 0..100 {
+        for t in &targets {
+            let _ = sock.send_to(b"gamestream-punch", t);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// `pin` = impressão digital esperada do host (vem do convite). Sem pin, aceita qualquer host.

@@ -31,6 +31,24 @@ use crate::{
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const MIN_BITRATE: u32 = 3;
 
+/// Canal para os códigos de resposta enquanto há uma transmissão ativa.
+static PUNCH: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<SocketAddr>>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Libera um espectador a partir do código de resposta dele (GS-R-...). Retorna quantos endereços.
+pub fn release_viewer(code: &str) -> Result<usize> {
+    let addrs = invite::decode_reply(code)?;
+    let n = addrs.len();
+    PUNCH
+        .lock()
+        .unwrap()
+        .as_ref()
+        .context("nenhuma transmissão ativa")?
+        .send(addrs)
+        .map_err(|_| anyhow::anyhow!("nenhuma transmissão ativa"))?;
+    Ok(n)
+}
+
 /// O host quer ver a própria transmissão (prévia sem som). A interface liga/desliga a qualquer momento.
 static PREVIEW: AtomicBool = AtomicBool::new(true);
 
@@ -514,7 +532,10 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     // Rede: identidade fixa + endpoint dual-stack (IPv4 e IPv6).
     let id = net::load_identity()?;
-    let ep = net::server_endpoint(o.port, &id)?;
+    let (ep, punch_sock) = net::server_endpoint(o.port, &id)?;
+    let punch_sock = Arc::new(punch_sock);
+    let (punch_tx, mut punch_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<SocketAddr>>();
+    *PUNCH.lock().unwrap() = Some(punch_tx);
     let code = net::security_code(&id.fingerprint);
     log(format!("Código de segurança deste host: {code}"));
     state::host(|h| h.security_code = code);
@@ -650,8 +671,19 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     let preview = preview_loop(vtx_preview);
 
+    // Códigos de resposta (hole punching): abre o firewall deste lado para cada espectador liberado.
+    let puncher = async {
+        while let Some(addrs) = punch_rx.recv().await {
+            let list: Vec<String> = addrs.iter().map(|a| a.ip().to_canonical().to_string()).collect();
+            log(format!("[conexão] liberando espectador ({}) por 20 segundos...", list.join(", ")));
+            let sock = punch_sock.clone();
+            tokio::spawn(async move { net::punch(&sock, &addrs).await });
+        }
+    };
+
     let res = tokio::select! {
         r = encoder => r,
+        _ = puncher => Ok(()),
         _ = preview => Ok(()),
         _ = tracker => Ok(()),
         _ = accept => Ok(()),
@@ -660,6 +692,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = renew => Ok(()),
         _ = stop => Ok(()),
     };
+    *PUNCH.lock().unwrap() = None;
     ep.close(0u32.into(), b"transmissao encerrada pelo host");
     if let Some(m) = &mapping {
         m.remove().await;

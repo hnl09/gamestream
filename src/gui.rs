@@ -205,6 +205,8 @@ struct App {
     volume: f32,
     muted: bool,
     view_task: Option<Task>,
+    reply_input: String,
+    reply_msg: Option<(bool, String)>,
 }
 
 impl App {
@@ -243,6 +245,8 @@ impl App {
             volume: 1.0,
             muted: false,
             view_task: None,
+            reply_input: String::new(),
+            reply_msg: None,
         };
         a.refresh();
         crate::updater::check_in_background();
@@ -592,6 +596,33 @@ impl App {
                 });
             });
 
+            card(ui, "Liberar espectador", |ui| {
+                hint(
+                    ui,
+                    "Se um espectador não conseguir conectar, ele receberá um código de resposta (GS-R-...).                      Cole o código aqui para liberar a conexão através do firewall do seu roteador.",
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.reply_input)
+                            .hint_text("GS-R-...")
+                            .desired_width(ui.available_width() - 90.0),
+                    );
+                    if ui.add_enabled(!self.reply_input.trim().is_empty(), egui::Button::new("Liberar")).clicked() {
+                        self.reply_msg = Some(match host::release_viewer(&self.reply_input) {
+                            Ok(_) => {
+                                self.reply_input.clear();
+                                (true, "Liberação enviada. O espectador deve conectar em alguns segundos.".into())
+                            }
+                            Err(e) => (false, format!("{e:#}")),
+                        });
+                    }
+                });
+                if let Some((ok, msg)) = &self.reply_msg {
+                    let col = if *ok { OK } else { Color32::from_rgb(255, 190, 90) };
+                    ui.label(RichText::new(msg).small().color(col));
+                }
+            });
+
             card(ui, "Espectadores conectados", |ui| {
                 if st.preview_open {
                     ui.label(RichText::new("🖥  Pré-visualização local (sem áudio)").color(MUTED_TXT));
@@ -651,6 +682,27 @@ impl App {
                     ui.spinner();
                     ui.label(RichText::new("Conectando...").size(17.0).strong());
                 });
+                if let Some(code) = &vs.reply_code {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("A conexão direta não respondeu.").strong());
+                    ui.label(
+                        "Envie o código de resposta abaixo ao transmissor. Ele deve colá-lo em                          \"Liberar espectador\"; a conexão será concluída automaticamente.",
+                    );
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(16, 17, 21))
+                        .rounding(8.0_f32)
+                        .inner_margin(10.0)
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(code).monospace().small().color(MUTED_TXT)).wrap());
+                        });
+                    if ui
+                        .add(egui::Button::new(RichText::new("📋  Copiar código de resposta").strong().color(Color32::WHITE)).fill(ACCENT))
+                        .clicked()
+                    {
+                        ui.output_mut(|o| o.copied_text = code.clone());
+                    }
+                    hint(ui, "Aguardando por até 3 minutos.");
+                }
             });
         }
     }
@@ -914,7 +966,11 @@ impl eframe::App for App {
                         if host_live {
                             pill(ui, "AO VIVO", LIVE);
                         } else if view_live {
-                            pill(ui, "CONECTADO", OK);
+                            if state::VIEW.lock().unwrap().phase == ViewPhase::Connected {
+                                pill(ui, "CONECTADO", OK);
+                            } else {
+                                pill(ui, "CONECTANDO", Color32::from_rgb(255, 190, 90));
+                            }
                         }
                     });
                 });

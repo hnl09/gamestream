@@ -5,6 +5,7 @@
 
 use std::{
     future::Future,
+    net::SocketAddr,
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -122,28 +123,64 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     log(format!("Conectando ({} endereço(s))...", inv.addrs.len()));
     let ep = net::client_endpoint(inv.fingerprint)?;
 
-    // Tenta todos os endereços em paralelo; o primeiro que responder ganha.
+    // Tenta todos os endereços em paralelo, repetindo a cada 2 s pela mesma porta local. Se a conexão
+    // direta não responder, exibe o código de resposta: quando o transmissor o usa ("Liberar
+    // espectador"), o firewall dele passa a aceitar estas tentativas (hole punching).
+    let local_port = ep.local_addr()?.port();
+    let reply_addrs: Vec<SocketAddr> = invite::local_addrs(local_port)
+        .into_iter()
+        .filter(|(a, k)| a.is_ipv6() || k.starts_with("VPN") || k.starts_with("IPv4"))
+        .map(|(a, _)| a)
+        .collect();
+    let reply_code = (!reply_addrs.is_empty()).then(|| invite::encode_reply(&reply_addrs));
+    let wait_total = if inv.fingerprint.is_some() && reply_code.is_some() { 180 } else { 8 };
+    let start = std::time::Instant::now();
     let mut tries = JoinSet::new();
-    for a in inv.addrs.clone() {
-        let ep = ep.clone();
-        tries.spawn(async move {
-            let c = ep.connect(a, "gamestream")?.await?;
-            anyhow::Ok(c)
-        });
-    }
-    let conn = tokio::time::timeout(Duration::from_secs(8), async {
-        let mut last = None;
-        while let Some(r) = tries.join_next().await {
-            match r {
-                Ok(Ok(c)) => return Ok(c),
-                Ok(Err(e)) => last = Some(e),
-                Err(e) => last = Some(e.into()),
+    let mut next_round = tokio::time::Instant::now();
+    let mut shown = false;
+    let mut last_err: Option<anyhow::Error> = None;
+    let conn = loop {
+        if tokio::time::Instant::now() >= next_round {
+            for a in inv.addrs.clone() {
+                let ep = ep.clone();
+                tries.spawn(async move {
+                    let c = ep.connect(a, "gamestream")?.await?;
+                    anyhow::Ok(c)
+                });
+            }
+            next_round += Duration::from_secs(2);
+        }
+        if !shown && start.elapsed() >= Duration::from_secs(3) {
+            if let Some(code) = &reply_code {
+                shown = true;
+                log(format!(
+                    "A conexão direta não respondeu. Envie este código de resposta ao transmissor \
+                     (ele deve usar \"Liberar espectador\"):\n{code}"
+                ));
+                state::view(|v| {
+                    v.reply_code = Some(code.clone());
+                    v.text = "Aguardando o transmissor liberar a conexão...".into();
+                });
             }
         }
-        Err(last.unwrap_or_else(|| anyhow!("nenhum endereço")))
-    })
-    .await
-    .map_err(|_| anyhow!("tempo de conexão esgotado. Verifique se a transmissão está ativa e se há um caminho de rede disponível (mesma VPN, IPv6 ou porta aberta)."))??;
+        if start.elapsed() >= Duration::from_secs(wait_total) {
+            let detail = last_err.map(|e| format!(" ({e:#})")).unwrap_or_default();
+            bail!(
+                "tempo de conexão esgotado{detail}. Verifique se a transmissão está ativa e se há um caminho de rede \
+                 disponível (código de resposta, VPN, IPv6 ou porta aberta)."
+            );
+        }
+        tokio::select! {
+            r = tries.join_next(), if !tries.is_empty() => match r {
+                Some(Ok(Ok(c))) => break c,
+                Some(Ok(Err(e))) => last_err = Some(e),
+                Some(Err(e)) => last_err = Some(e.into()),
+                None => {}
+            },
+            _ = tokio::time::sleep_until(next_round) => {}
+        }
+    };
+    state::view(|v| v.reply_code = None);
     tries.abort_all();
 
     // Sem convite (IP direto) não há como saber se é mesmo o host: não manda a senha às cegas.

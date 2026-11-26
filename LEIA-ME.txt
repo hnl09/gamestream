@@ -106,7 +106,15 @@ CONEXÃO PELA INTERNET
        - Todos os participantes devem estar na mesma rede virtual. Inicie o
          GameStream após conectar-se à VPN; o endereço da VPN é incluído no
          convite automaticamente.
-  4) Redirecionamento manual da porta UDP 9000 no roteador.
+  4) Código de resposta (quando nada acima funcionar): se a conexão direta
+     não responder em alguns segundos, o espectador recebe um código
+     GS-R-... e deve enviá-lo ao transmissor. O transmissor cola o código em
+     "Liberar espectador" (ou no terminal, se estiver usando a linha de
+     comando). O aplicativo do transmissor envia pacotes ao espectador, o
+     firewall do roteador passa a aceitar a conexão e o espectador conecta
+     automaticamente. É especialmente eficaz quando ambos têm IPv6, mesmo com
+     o firewall do modem bloqueando conexões de entrada.
+  5) Redirecionamento manual da porta UDP 9000 no roteador.
 
   Na primeira execução, o Firewall do Windows solicitará permissão de acesso
   à rede: selecione "Permitir".

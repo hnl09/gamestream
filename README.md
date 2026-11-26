@@ -27,7 +27,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Áudio sob controle**: transmita apenas o áudio do jogo ou todo o áudio do sistema **exceto o Discord**, evitando que participantes de uma chamada de voz ouçam o próprio retorno. Microfone opcional.
 - **Vários espectadores ao mesmo tempo**: o vídeo é codificado uma única vez e distribuído a todos.
 - **Bitrate adaptativo**: a qualidade se ajusta automaticamente à conexão dos espectadores, ou pode ser fixada manualmente.
-- **Conexão sem configurar o roteador**: IPv6, UPnP ou VPN. O convite contém todos os endereços possíveis, e o espectador testa todos em paralelo.
+- **Conexão sem configurar o roteador**: IPv6, UPnP, hole punching por código de resposta ou VPN. O convite contém todos os endereços possíveis, e o espectador testa todos em paralelo.
 - **Segurança**: criptografia TLS 1.3, verificação da identidade do transmissor pelo convite (proteção contra interceptação), senha e código de segurança.
 - **Controles na janela de vídeo**: volume, zoom a partir do cursor, tela cheia e estatísticas em tempo real (ping, FPS, perda de pacotes e taxa recebida).
 - **Pré-visualização local** da transmissão, sem áudio.
@@ -102,8 +102,9 @@ O GameStream conecta os computadores diretamente. O convite inclui todos os ende
 
 1. **IPv6**: oferecido pela maioria das operadoras. Se transmissor e espectador tiverem IPv6, a conexão costuma funcionar sem nenhuma configuração.
 2. **UPnP**: o aplicativo solicita ao roteador a abertura automática da porta UDP 9000.
-3. **VPN** ([Tailscale](https://tailscale.com) ou [Radmin VPN](https://www.radmin-vpn.com)): funciona em qualquer cenário, inclusive com CGNAT. Com todos na mesma rede virtual, o endereço da VPN entra no convite automaticamente.
-4. **Redirecionamento manual** da porta **UDP 9000** no roteador.
+3. **Código de resposta (hole punching)**: se a conexão direta não responder, o espectador recebe um código `GS-R-...` para enviar ao transmissor, que o cola em **Liberar espectador**. O transmissor envia pacotes ao espectador, o firewall do roteador passa a aceitar a conexão, e o espectador conecta automaticamente. É especialmente eficaz com IPv6, mesmo quando o modem bloqueia conexões de entrada.
+4. **VPN** ([Tailscale](https://tailscale.com) ou [Radmin VPN](https://www.radmin-vpn.com)): funciona em qualquer cenário, inclusive com CGNAT. Com todos na mesma rede virtual, o endereço da VPN entra no convite automaticamente.
+5. **Redirecionamento manual** da porta **UDP 9000** no roteador.
 
 Na primeira execução, permita o acesso do GameStream à rede quando o Firewall do Windows solicitar.
 
@@ -121,7 +122,7 @@ Na primeira execução, permita o acesso do GameStream à rede quando o Firewall
 <details>
 <summary><b>"Tempo de conexão esgotado" ao conectar</b></summary>
 
-Não há caminho de rede entre os computadores. Verifique se ambos têm IPv6, se o UPnP está ativo no roteador do transmissor ou utilize uma VPN (Tailscale ou Radmin VPN). Confirme também que o Firewall do Windows permitiu o GameStream.
+Não há caminho de rede entre os computadores. Use o **código de resposta** exibido ao espectador (o transmissor deve colá-lo em *Liberar espectador*), verifique se ambos têm IPv6 ou utilize uma VPN (Tailscale ou Radmin VPN). Confirme também que o Firewall do Windows permitiu o GameStream.
 </details>
 
 <details>
