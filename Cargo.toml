@@ -2,7 +2,9 @@
 name = "gamestream"
 version = "0.4.2"
 edition = "2021"
-description = "Stream de jogos com baixa latência: host (captura + encoder HEVC na GPU) e viewer nativo, via QUIC"
+description = "Transmissão de vídeo e áudio com baixa latência para Windows (HEVC acelerado por GPU + QUIC)"
+license = "MIT"
+repository = "https://github.com/hnl09/gamestream"
 
 [dependencies]
 anyhow = "1"
