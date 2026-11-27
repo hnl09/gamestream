@@ -46,7 +46,10 @@ TRANSMITIR
   Opcional: "Testar conexão" (em Qualidade) mede o upload e sugere o bitrate.
   Durante a transmissão, "Trocar fonte" muda o monitor ou a janela sem
   desconectar os espectadores. Se um jogo mudar o modo de tela (tela cheia
-  exclusiva, resolução), a captura é reiniciada automaticamente.
+  exclusiva, resolução), a captura é reiniciada automaticamente; se ela
+  falhar seguidamente, o app troca sozinho para a Windows Graphics Capture.
+  Se ainda falhar, use "Tela cheia em janela" (sem bordas) no jogo ou
+  transmita a "Janela específica" dele.
 
 ------------------------------------------------------------
 ASSISTIR

@@ -31,6 +31,8 @@ pub struct MonitorInfo {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    /// HMONITOR do monitor (para a captura pelo Windows Graphics Capture).
+    pub hmon: isize,
 }
 
 impl MonitorInfo {
@@ -53,6 +55,14 @@ pub struct Capture {
     pub crop: Option<(i32, i32, i32, i32)>,
     /// Captura nativa da janela (Windows Graphics Capture): segue a janela e funciona mesmo coberta.
     pub hwnd: Option<isize>,
+    /// Monitor inteiro pelo Windows Graphics Capture (HMONITOR) em vez do Desktop Duplication (ddagrab).
+    /// Usado como alternativa quando o ddagrab falha seguidamente (alguns jogos em tela cheia exclusiva).
+    pub hmonitor: Option<isize>,
+}
+
+/// HMONITOR da saída `idx` (mesma numeração do ddagrab).
+pub fn hmonitor_for(idx: u32) -> Option<isize> {
+    monitors().into_iter().find(|m| m.idx == idx).map(|m| m.hmon).filter(|h| *h != 0)
 }
 
 /// Processo dono da janela (para capturar só o som dele).
@@ -75,7 +85,15 @@ pub fn monitors() -> Vec<MonitorInfo> {
             if let Ok(d) = o.GetDesc() {
                 let r = d.DesktopCoordinates;
                 let name = String::from_utf16_lossy(&d.DeviceName).trim_end_matches('\0').to_string();
-                out.push(MonitorInfo { idx: i, name, x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top });
+                out.push(MonitorInfo {
+                    idx: i,
+                    name,
+                    x: r.left,
+                    y: r.top,
+                    w: r.right - r.left,
+                    h: r.bottom - r.top,
+                    hmon: d.Monitor.0 as isize,
+                });
             }
             i += 1;
         }
@@ -124,7 +142,7 @@ pub fn windows() -> Vec<WindowInfo> {
 
 pub fn resolve(src: &Source) -> Result<Capture> {
     match src {
-        Source::Monitor(i) => Ok(Capture { output_idx: *i, crop: None, hwnd: None }),
+        Source::Monitor(i) => Ok(Capture { output_idx: *i, crop: None, hwnd: None, hmonitor: None }),
         Source::Window { hwnd, title } => unsafe {
             let h = HWND(*hwnd as *mut c_void);
             if !IsWindow(h).as_bool() {
@@ -151,7 +169,7 @@ pub fn resolve(src: &Source) -> Result<Capture> {
             if cw < 64 || ch < 64 {
                 bail!("{}", crate::tr!("a janela \"{title}\" é pequena demais", "the window \"{title}\" is too small"));
             }
-            Ok(Capture { output_idx: m.idx, crop: Some((ox, oy, cw, ch)), hwnd: None })
+            Ok(Capture { output_idx: m.idx, crop: Some((ox, oy, cw, ch)), hwnd: None, hmonitor: None })
         },
     }
 }

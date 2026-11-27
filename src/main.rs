@@ -65,6 +65,9 @@ enum Cmd {
         /// Áudio sem compressão (PCM) em vez de Opus 160 kbps
         #[arg(long)]
         pcm: bool,
+        /// Não abrir a janela de pré-visualização
+        #[arg(long)]
+        no_preview: bool,
         #[arg(long)]
         password: Option<String>,
         #[arg(long, default_value = "ffmpeg")]
@@ -236,7 +239,10 @@ fn cli() -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, password, ffmpeg } => {
+        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, no_preview, password, ffmpeg } => {
+            if no_preview {
+                host::set_preview(false);
+            }
             let audio_device = parse_audio(&audio, window.is_some())?;
             let source = match window {
                 Some(t) => {

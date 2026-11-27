@@ -30,7 +30,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Código de sala curto** (ex.: `KX7-92B`) e **conexão automática**: o espectador digita o código e o aplicativo libera a conexão pelo firewall do transmissor sozinho, sem configurar o roteador. Também funciona por IPv6, UPnP, código de resposta ou VPN.
 - **Sala de espera**: aprove cada espectador antes de exibir a transmissão e remova quem quiser durante a sessão.
 - **Teste de conexão** opcional, que mede o upload e sugere o bitrate.
-- **Troca de monitor ou janela durante a transmissão**, sem desconectar os espectadores, e recuperação automática quando um jogo muda o modo de tela.
+- **Troca de monitor ou janela durante a transmissão**, sem desconectar os espectadores, e recuperação automática quando um jogo muda o modo de tela (se a captura do monitor falhar seguidamente, o aplicativo alterna sozinho para a Windows Graphics Capture).
 - **Segurança**: criptografia TLS 1.3, verificação da identidade do transmissor pelo convite (proteção contra interceptação), senha e código de segurança.
 - **Controles na janela de vídeo**: volume, zoom a partir do cursor, tela cheia e estatísticas em tempo real (ping, FPS, perda de pacotes e taxa recebida).
 - **Pré-visualização local** da transmissão, sem áudio.
@@ -143,6 +143,12 @@ Use o modo de bitrate **Automático** ou reduza o bitrate. Confira a perda de pa
 <summary><b>A janela capturada fica preta ou parada</b></summary>
 
 Não minimize a janela transmitida. Em jogos, prefira o modo **janela sem bordas** (borderless) em vez de tela cheia exclusiva. Na captura de janela, o FPS diminui quando o conteúdo não muda; isso é esperado.
+</details>
+
+<details>
+<summary><b>A transmissão falha ao abrir um jogo em tela cheia</b></summary>
+
+Alguns jogos em tela cheia exclusiva (às vezes junto com overlays como o RivaTuner/RTSS) impedem a captura padrão do monitor. O aplicativo reinicia a captura e, se ela falhar duas vezes seguidas, troca sozinho para a Windows Graphics Capture; os espectadores continuam conectados. Se a imagem continuar falhando, coloque o jogo em **tela cheia em janela** (sem bordas) ou transmita a **janela específica** do jogo.
 </details>
 
 <details>

@@ -215,6 +215,10 @@ fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u
         }
         g
     };
+    if let (None, Some(hm)) = (cap.hwnd, cap.hmonitor) {
+        // Monitor inteiro pelo Windows Graphics Capture (compatível com mais jogos em tela cheia).
+        graph = format!("gfxcapture=hmonitor={hm}:max_framerate={}:capture_cursor=1:width=-2:height=-2", o.fps);
+    }
     if cpu_copy {
         graph.push_str(if enc == Enc::Qsv { ",hwdownload,format=bgra,format=nv12" } else { ",hwdownload,format=bgra" });
     }
@@ -324,7 +328,7 @@ fn capture_for(src: &Source, gfx: bool) -> Result<Capture> {
     match src {
         Source::Window { hwnd, .. } if gfx => {
             sources::resolve(src)?; // confere se a janela existe e não está minimizada
-            Ok(Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd) })
+            Ok(Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd), hmonitor: None })
         }
         _ => sources::resolve(src),
     }
@@ -427,12 +431,16 @@ async fn encoder_loop(
     mut br_rx: watch::Receiver<u32>,
     vtx: broadcast::Sender<VideoChunk>,
     bytes_out: Arc<AtomicU64>,
+    gfx: bool,
 ) -> Result<()> {
     // Reinícios seguidos por falha de captura (o contador zera quando o encoder fica estável).
     let mut failures: u32 = 0;
+    // Captura alternativa (Windows Graphics Capture) adotada depois de falhas do ddagrab.
+    let mut fallback: Option<Capture> = None;
+    let mut tip_shown = false;
     loop {
         let br = *br_rx.borrow_and_update();
-        let cap = cap_rx.borrow_and_update().clone();
+        let cap = fallback.clone().unwrap_or_else(|| cap_rx.borrow_and_update().clone());
         let started = Instant::now();
         let mut child = Command::new(&o.ffmpeg)
             .args(ffmpeg_args(o, &cap, enc, cpu_copy, br, false))
@@ -470,26 +478,47 @@ async fn encoder_loop(
                 let _ = child.kill().await;
                 // O Windows interrompe a captura quando um jogo entra/sai de tela cheia exclusiva ou muda a
                 // resolução (DXGI_ERROR_ACCESS_LOST). Reinicia o encoder sem derrubar os espectadores; eles
-                // retomam no próximo keyframe.
+                // retomam no próximo keyframe. Nunca desiste: a transmissão só termina quando o usuário parar.
                 if started.elapsed() > Duration::from_secs(30) {
                     failures = 0;
                 }
                 failures += 1;
-                if failures > 8 {
-                    bail!(crate::i18n::t("o encoder (FFmpeg) foi encerrado. Se a fonte for uma janela, verifique se ela foi fechada ou minimizada."));
-                }
                 log(crate::tr!(
-                    "[encoder] captura interrompida (o jogo pode ter mudado de modo de tela); reiniciando ({}/8)...",
-                    "[encoder] capture interrupted (the game may have changed display mode); restarting ({}/8)...",
+                    "[encoder] captura interrompida (o jogo pode ter mudado de modo de tela); reiniciando (tentativa {})...",
+                    "[encoder] capture interrupted (the game may have changed display mode); restarting (attempt {})...",
                     failures
                 ));
-                tokio::time::sleep(Duration::from_millis(500 * failures as u64)).await;
+                // Com alguns jogos em tela cheia exclusiva (e overlays como o RivaTuner) o Desktop Duplication
+                // (ddagrab) falha sempre; troca a captura do monitor para o Windows Graphics Capture.
+                // Se o Windows Graphics Capture também falhar seguidamente, alterna de volta (e assim por diante).
+                let whole_monitor = cap.hwnd.is_none() && cap.crop.is_none();
+                if gfx && whole_monitor && failures >= 2 && (failures - 2) % 3 == 0 {
+                    if fallback.is_some() {
+                        fallback = None;
+                        log(crate::i18n::t("[encoder] Captura do monitor voltou para o Desktop Duplication."));
+                    } else if let Some(hm) = sources::hmonitor_for(cap.output_idx) {
+                        fallback = Some(Capture { hmonitor: Some(hm), ..cap.clone() });
+                        log(crate::i18n::t("[encoder] Captura do monitor trocada para Windows Graphics Capture (compatível com mais jogos)."));
+                    }
+                }
+                if failures == 3 && !tip_shown {
+                    tip_shown = true;
+                    log(crate::i18n::t("Dica: se a imagem continuar falhando, coloque o jogo em \"Tela cheia em janela\" (sem bordas) ou transmita a \"Janela específica\" do jogo."));
+                }
+                let wait = Duration::from_millis((500 * failures as u64).min(5000));
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = cap_rx.changed() => { fallback = None; failures = 0; }
+                }
             }
             _ = br_rx.changed() => {
                 let _ = child.kill().await;
             }
             _ = cap_rx.changed() => {
                 let _ = child.kill().await;
+                // Fonte nova escolhida pelo usuário: volta ao método de captura normal.
+                fallback = None;
+                failures = 0;
             }
         }
     }
@@ -722,7 +751,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             }
         }
     };
-    let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone());
+    let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone(), gfx);
     let vtx_preview = vtx.clone();
 
     let controller = async {
