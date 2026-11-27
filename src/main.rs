@@ -8,6 +8,7 @@ mod i18n;
 mod invite;
 mod net;
 mod procaudio;
+mod room;
 mod settings;
 mod sources;
 mod state;
@@ -58,6 +59,12 @@ enum Cmd {
         mic: Option<String>,
         #[arg(long)]
         no_upnp: bool,
+        /// Não usar o servidor de encontro (sem código de sala nem conexão automática)
+        #[arg(long)]
+        no_room: bool,
+        /// Áudio sem compressão (PCM) em vez de Opus 160 kbps
+        #[arg(long)]
+        pcm: bool,
         #[arg(long)]
         password: Option<String>,
         #[arg(long, default_value = "ffmpeg")]
@@ -79,6 +86,12 @@ enum Cmd {
     Sources,
     /// Verifica e instala a versão mais recente do GameStream
     Update,
+    /// Mede o upload até o servidor de encontro e sugere o bitrate
+    Speedtest {
+        /// Número de espectadores esperados
+        #[arg(long, default_value_t = 1)]
+        viewers: u32,
+    },
     /// Verifica o FFmpeg (faz o download se necessário) e exibe o caminho utilizado
     Ffmpeg,
     /// Testa a captura de áudio, exibindo o nível medido por alguns segundos
@@ -97,6 +110,8 @@ enum Cmd {
 }
 
 fn main() {
+    // Provedor de criptografia único para todo o app (QUIC, HTTPS e WebSocket).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     unsafe {
         use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -158,6 +173,14 @@ fn cli() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Speedtest { viewers } => {
+            let server = room::server().context("servidor de encontro não configurado")?;
+            println!("Medindo o upload por ~6 s...");
+            let mbps = room::speedtest(&server, 6.0)?;
+            let suggested = ((mbps * 0.8 / viewers.max(1) as f64).floor() as u32).clamp(3, 60);
+            println!("Upload: {mbps:.0} Mbps  ->  bitrate sugerido para {viewers} espectador(es): {suggested} Mbps");
+            Ok(())
+        }
         Cmd::Update => {
             println!("Versão atual: v{}", updater::VERSION);
             match updater::check()? {
@@ -193,7 +216,7 @@ fn cli() -> Result<()> {
             };
             println!("Capturando: {desc}");
             let (tx, mut rx) = tokio::sync::broadcast::channel::<bytes::Bytes>(4096);
-            let (_pipe, _, _) = audio::start_capture(tx, src, mic.map(|d| (d, 1.0)))?;
+            let (_pipe, _, _) = audio::start_capture(tx, src, mic.map(|d| (d, 1.0)), false)?;
             rt.block_on(async {
                 for s in 1..=secs {
                     let end = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -213,7 +236,7 @@ fn cli() -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, password, ffmpeg } => {
+        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, password, ffmpeg } => {
             let audio_device = parse_audio(&audio, window.is_some())?;
             let source = match window {
                 Some(t) => {
@@ -234,6 +257,9 @@ fn cli() -> Result<()> {
                 mic,
                 password,
                 upnp: !no_upnp,
+                room: !no_room,
+                approval: false,
+                audio_pcm: pcm,
                 ffmpeg,
             };
             // Códigos de resposta (GS-R-...) colados no terminal liberam espectadores.

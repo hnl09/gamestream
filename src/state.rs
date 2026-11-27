@@ -10,7 +10,10 @@ pub struct HostStatus {
     pub mbps: f64,
     /// Bitrate alvo atual do encoder (muda sozinho no modo automático).
     pub bitrate: u32,
-    pub viewers: Vec<String>,
+    /// Espectadores conectados: (chave para remover, descrição).
+    pub viewers: Vec<(String, String)>,
+    /// Sala de espera: (id, endereço).
+    pub pending: Vec<(u64, String)>,
     pub invite: Option<String>,
     /// Endereços pelos quais os espectadores podem se conectar (LAN, IPv6, UPnP...).
     pub reach: Vec<String>,
@@ -18,6 +21,9 @@ pub struct HostStatus {
     pub error: Option<String>,
     /// A janela de prévia (o host vendo a própria transmissão) está aberta.
     pub preview_open: bool,
+    /// Código da sala no servidor de encontro (ex.: "KX7-92B") e se ela está conectada.
+    pub room: Option<String>,
+    pub room_online: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]

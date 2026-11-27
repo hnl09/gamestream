@@ -260,6 +260,9 @@ struct App {
     encoder: String,
     password: String,
     friends: u32,
+    approval: bool,
+    audio_pcm: bool,
+    speed: Option<std::sync::Arc<std::sync::Mutex<Option<Result<f64, String>>>>>,
     preview: bool,
     host_task: Option<Task>,
     live_desc: String,
@@ -301,6 +304,9 @@ impl App {
             encoder: "auto".into(),
             password: String::new(),
             friends: 4,
+            approval: true,
+            audio_pcm: false,
+            speed: None,
             preview: true,
             host_task: None,
             live_desc: String::new(),
@@ -369,6 +375,9 @@ impl App {
             mic: self.mic.clone(),
             password: (!self.password.is_empty()).then(|| self.password.clone()),
             upnp: self.upnp,
+            room: true,
+            approval: self.approval,
+            audio_pcm: self.audio_pcm,
             ffmpeg: "ffmpeg".into(),
         };
         state::host(|h| *h = state::HostStatus::default());
@@ -471,6 +480,10 @@ impl App {
         card(ui, crate::i18n::t("2. Áudio"), |ui| {
             ui.checkbox(&mut self.audio, crate::i18n::t("Transmitir áudio"));
             ui.add_enabled_ui(self.audio, |ui| {
+                ui.checkbox(&mut self.audio_pcm, crate::i18n::t("Áudio sem compressão (PCM)"))
+                    .on_hover_text(crate::i18n::t("Por padrão o áudio usa Opus a 160 kbps, qualidade considerada transparente, com ~0,16 Mbps por espectador. Sem compressão usa ~1,5 Mbps por espectador."));
+            });
+            ui.add_enabled_ui(self.audio, |ui| {
                 ui.label(crate::i18n::t("Fonte de áudio:"));
                 let window_mode = self.src_kind == SrcKind::Window;
                 egui::ComboBox::from_id_salt("audio_src")
@@ -570,6 +583,7 @@ impl App {
                     ui.selectable_value(&mut self.fps, f, f.to_string());
                 }
             });
+            self.speed_test_ui(ui);
             egui::CollapsingHeader::new(crate::i18n::t("Guia de bitrate")).show(ui, |ui| bitrate_guide(ui, self.bitrate, &mut self.friends));
         });
 
@@ -583,6 +597,7 @@ impl App {
                         .hint_text(crate::i18n::t("Recomendado")),
                 );
             });
+            ui.checkbox(&mut self.approval, crate::i18n::t("Sala de espera: aprovar cada espectador antes de exibir a transmissão"));
             ui.checkbox(&mut self.upnp, crate::i18n::t("Abrir porta automaticamente no roteador (UPnP)"));
             egui::CollapsingHeader::new(crate::i18n::t("Avançado")).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -641,6 +656,23 @@ impl App {
             });
 
             card(ui, crate::i18n::t("Convite"), |ui| {
+                if let Some(room) = &st.room {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(crate::i18n::t("Código da sala")).color(pal().muted));
+                        ui.label(RichText::new(room).size(26.0).strong().monospace().color(pal().accent));
+                        if ui.small_button("📋").on_hover_text(crate::i18n::t("Copiar código da sala")).clicked() {
+                            ui.output_mut(|o| o.copied_text = room.clone());
+                        }
+                        let (txt, col) = if st.room_online {
+                            (crate::i18n::t("online"), pal().ok)
+                        } else {
+                            (crate::i18n::t("conectando ao servidor..."), Color32::from_rgb(255, 190, 90))
+                        };
+                        ui.label(RichText::new(txt).small().color(col));
+                    });
+                    hint(ui, crate::i18n::t("Espectadores podem digitar o código da sala ou colar o convite completo; a conexão é liberada automaticamente."));
+                    ui.add_space(4.0);
+                }
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new(RichText::new(crate::i18n::t("📋  Copiar convite")).strong().color(Color32::WHITE)).fill(pal().accent))
@@ -690,6 +722,27 @@ impl App {
                 }
             });
 
+            if !st.pending.is_empty() {
+                card(ui, crate::i18n::t("Sala de espera"), |ui| {
+                    for (id, who) in &st.pending {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("⏳  {who}"));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button(crate::i18n::t("Recusar")).clicked() {
+                                    host::decide(*id, false);
+                                }
+                                if ui
+                                    .add(egui::Button::new(RichText::new(crate::i18n::t("Aprovar")).strong().color(Color32::WHITE)).fill(pal().ok))
+                                    .clicked()
+                                {
+                                    host::decide(*id, true);
+                                }
+                            });
+                        });
+                    }
+                });
+            }
+
             card(ui, crate::i18n::t("Espectadores conectados"), |ui| {
                 if st.preview_open {
                     ui.label(RichText::new(crate::i18n::t("🖥  Pré-visualização local (sem áudio)")).color(pal().muted));
@@ -697,8 +750,15 @@ impl App {
                 if st.viewers.is_empty() {
                     hint(ui, crate::i18n::t("Nenhum espectador conectado. Compartilhe o convite e a senha."));
                 }
-                for v in &st.viewers {
-                    ui.label(format!("👤  {v}"));
+                for (key, label) in &st.viewers {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("👤  {label}"));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button(crate::i18n::t("Remover")).on_hover_text(crate::i18n::t("Desconecta e bloqueia até o fim da transmissão")).clicked() {
+                                host::kick(key);
+                            }
+                        });
+                    });
                 }
             });
         }
@@ -723,7 +783,7 @@ impl App {
                         .desired_rows(3)
                         .desired_width(f32::INFINITY)
                         .font(egui::TextStyle::Monospace)
-                        .hint_text(crate::i18n::t("Cole o convite (GS-...) recebido do transmissor")),
+                        .hint_text(crate::i18n::t("Cole o convite (GS-...) ou digite o código da sala (ex.: KX7-92B)")),
                 );
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::t("Senha:"));
@@ -749,6 +809,9 @@ impl App {
                     ui.spinner();
                     ui.label(RichText::new(crate::i18n::t("Conectando...")).size(17.0).strong());
                 });
+                if !vs.text.is_empty() && vs.text != crate::i18n::t("Conectando...") && vs.reply_code.is_none() {
+                    ui.label(RichText::new(&vs.text).color(pal().muted));
+                }
                 if let Some(code) = &vs.reply_code {
                     ui.add_space(6.0);
                     ui.label(RichText::new(crate::i18n::t("A conexão direta não respondeu.")).strong());
@@ -948,6 +1011,53 @@ impl App {
             });
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {
             self.popup = None;
+        }
+    }
+}
+
+impl App {
+    /// Teste de conexão opcional: mede o upload até o servidor de encontro e sugere o bitrate.
+    fn speed_test_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(server) = crate::room::server() else { return };
+        let result = self.speed.as_ref().map(|s| s.lock().unwrap().clone());
+        ui.horizontal(|ui| {
+            let running = matches!(result, Some(None));
+            if ui.add_enabled(!running, egui::Button::new(crate::i18n::t("📶 Testar conexão"))).clicked() {
+                let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+                self.speed = Some(slot.clone());
+                std::thread::spawn(move || {
+                    let r = crate::room::speedtest(&server, 6.0).map_err(|e| format!("{e:#}"));
+                    *slot.lock().unwrap() = Some(r);
+                });
+            }
+            if running {
+                ui.spinner();
+                ui.label(RichText::new(crate::i18n::t("Medindo o upload (cerca de 6 segundos)...")).small().color(pal().muted));
+            }
+        });
+        match result {
+            Some(Some(Ok(mbps))) => {
+                let viewers = self.friends.max(1);
+                // 80% do upload, dividido pelos espectadores esperados, entre 3 e 60 Mbps.
+                let suggested = ((mbps * 0.8 / viewers as f64).floor() as u32).clamp(3, 60);
+                ui.label(crate::tr!(
+                    "Upload medido: {:.0} Mbps. Para {} espectador(es), bitrate sugerido: {} Mbps.",
+                    "Measured upload: {:.0} Mbps. For {} viewer(s), suggested bitrate: {} Mbps.",
+                    mbps, viewers, suggested
+                ));
+                ui.horizontal(|ui| {
+                    ui.label(crate::i18n::t("Espectadores esperados:"));
+                    ui.add(egui::DragValue::new(&mut self.friends).range(1..=16));
+                    if ui.button(crate::tr!("Usar {} Mbps", "Use {} Mbps", suggested)).clicked() {
+                        self.bitrate = suggested;
+                    }
+                });
+                hint(ui, crate::i18n::t("Medido até o servidor mais próximo; a velocidade até cada espectador pode ser menor."));
+            }
+            Some(Some(Err(e))) => {
+                ui.label(RichText::new(crate::tr!("Não foi possível testar: {e}", "Could not run the test: {e}")).small().color(Color32::from_rgb(255, 190, 90)));
+            }
+            _ => {}
         }
     }
 }

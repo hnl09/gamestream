@@ -35,6 +35,30 @@ pub const MIN_BITRATE: u32 = 3;
 static PUNCH: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<SocketAddr>>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
+/// Sala de espera e remoção de espectadores (comandos vindos da interface).
+static NEXT_PENDING: AtomicU64 = AtomicU64::new(1);
+static DECISIONS: std::sync::LazyLock<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<bool>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static CONNS: std::sync::LazyLock<Mutex<HashMap<String, quinn::Connection>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static BANNED: std::sync::LazyLock<Mutex<std::collections::HashSet<std::net::IpAddr>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// Aprova (true) ou recusa (false) um espectador na sala de espera.
+pub fn decide(id: u64, approve: bool) {
+    if let Some(tx) = DECISIONS.lock().unwrap().remove(&id) {
+        let _ = tx.send(approve);
+    }
+}
+
+/// Remove um espectador conectado e bloqueia o endereço dele até o fim da transmissão.
+pub fn kick(key: &str) {
+    if let Some(conn) = CONNS.lock().unwrap().remove(key) {
+        BANNED.lock().unwrap().insert(conn.remote_address().ip().to_canonical());
+        conn.close(2u32.into(), b"removido pelo transmissor");
+    }
+}
+
 /// Libera um espectador a partir do código de resposta dele (GS-R-...). Retorna quantos endereços.
 pub fn release_viewer(code: &str) -> Result<usize> {
     let addrs = invite::decode_reply(code)?;
@@ -132,6 +156,12 @@ pub struct HostOpts {
     pub mic: Option<String>,
     pub password: Option<String>,
     pub upnp: bool,
+    /// Usar o servidor de encontro (código curto e conexão automática).
+    pub room: bool,
+    /// Sala de espera: cada espectador precisa ser aprovado antes de receber a transmissão.
+    pub approval: bool,
+    /// Áudio sem compressão (PCM, ~1,5 Mbps por espectador) em vez de Opus (~0,16 Mbps).
+    pub audio_pcm: bool,
     pub ffmpeg: String,
 }
 
@@ -509,12 +539,12 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     } else {
         let (src, desc) = resolve_audio(&o);
         let mic = o.mic.clone().map(|d| (d, 1.0));
-        let started = match audio::start_capture(atx.clone(), src, mic.clone()) {
+        let started = match audio::start_capture(atx.clone(), src, mic.clone(), !o.audio_pcm) {
             Ok(v) => Ok(v),
             Err(e) => {
                 // Captura por processo indisponível (Windows antigo?): cai para o som do PC todo.
                 log(crate::tr!("Áudio: captura por aplicativo indisponível ({e:#}); usando todo o áudio do sistema.", "Audio: per-application capture unavailable ({e:#}); using all system audio."));
-                audio::start_capture(atx.clone(), audio::CaptureSource::Output(None), mic)
+                audio::start_capture(atx.clone(), audio::CaptureSource::Output(None), mic, !o.audio_pcm)
             }
         };
         match started {
@@ -535,7 +565,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let (ep, punch_sock) = net::server_endpoint(o.port, &id)?;
     let punch_sock = Arc::new(punch_sock);
     let (punch_tx, mut punch_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<SocketAddr>>();
-    *PUNCH.lock().unwrap() = Some(punch_tx);
+    *PUNCH.lock().unwrap() = Some(punch_tx.clone());
     let code = net::security_code(&id.fingerprint);
     log(crate::tr!("Código de segurança deste host: {code}", "This host's security code: {code}"));
     state::host(|h| h.security_code = code);
@@ -588,9 +618,23 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     for r in &reach {
         log(format!("  {r}"));
     }
+    // Sala no servidor de encontro: código curto e conexão automática (sem código de resposta).
+    let room_code = crate::room::code_from_fp(&id.fingerprint);
+    let _room = match (o.room, crate::room::server()) {
+        (true, Some(server)) => {
+            log(crate::tr!(
+                "Código da sala: {}",
+                "Room code: {}",
+                crate::room::display(&room_code)
+            ));
+            Some(crate::room::start_host(server, room_code.clone(), invite_code.clone(), crate::room::load_secret(), punch_tx.clone()))
+        }
+        _ => None,
+    };
     state::host(|h| {
         h.invite = Some(invite_code);
         h.reach = reach;
+        h.room = _room.as_ref().map(|_| crate::room::display(&room_code));
     });
 
     let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
@@ -621,11 +665,12 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         let ep = ep.clone();
         let viewers = viewers.clone();
         let password = o.password.clone();
+        let (approval, opus) = (o.approval, !o.audio_pcm);
         async move {
             while let Some(inc) = ep.accept().await {
                 let (vtx, atx, viewers, password) = (vtx.clone(), atx.clone(), viewers.clone(), password.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = handle_viewer(inc, vtx, atx, audio_fmt, password, viewers).await {
+                    if let Err(e) = handle_viewer(inc, vtx, atx, audio_fmt, opus, approval, password, viewers).await {
                         log(crate::tr!("[espectador] {e:#}", "[viewer] {e:#}"));
                     }
                 });
@@ -640,9 +685,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             let now = bytes_out.load(Ordering::Relaxed);
             let mbps = (now - last) as f64 * 8.0 / 2.0 / 1e6;
             last = now;
-            let list: Vec<String> = viewers.lock().unwrap().iter().map(|(a, v)| {
+            let list: Vec<(String, String)> = viewers.lock().unwrap().iter().map(|(a, v)| {
                 let rtt = v.conn.stats().path.rtt.as_millis();
-                format!("{}  (ping {rtt} ms)", a.ip().to_canonical())
+                (a.to_string(), format!("{}  (ping {rtt} ms)", a.ip().to_canonical()))
             }).collect();
             state::host(|h| {
                 h.mbps = mbps;
@@ -684,6 +729,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = stop => Ok(()),
     };
     *PUNCH.lock().unwrap() = None;
+    DECISIONS.lock().unwrap().clear();
+    CONNS.lock().unwrap().clear();
+    BANNED.lock().unwrap().clear();
     ep.close(0u32.into(), b"transmissao encerrada pelo host");
     if let Some(m) = &mapping {
         m.remove().await;
@@ -696,15 +744,22 @@ async fn handle_viewer(
     vtx: broadcast::Sender<VideoChunk>,
     atx: broadcast::Sender<Bytes>,
     audio_fmt: Option<(u32, u16)>,
+    opus: bool,
+    approval: bool,
     password: Option<String>,
     viewers: Viewers,
 ) -> Result<()> {
-    let conn = inc.await?;
+    // Tentativas paralelas do espectador que perderam a corrida terminam aqui, sem log.
+    let Ok(conn) = inc.await else { return Ok(()) };
     let addr = conn.remote_address();
     let shown = addr.ip().to_canonical();
+    if BANNED.lock().unwrap().contains(&shown) {
+        conn.close(2u32.into(), b"removido pelo transmissor");
+        return Ok(());
+    }
 
     // Primeiro stream do viewer = senha (pode ser vazia). Trafega criptografada (TLS 1.3).
-    let mut auth = tokio::time::timeout(Duration::from_secs(5), conn.accept_uni()).await??;
+    let Ok(Ok(mut auth)) = tokio::time::timeout(Duration::from_secs(5), conn.accept_uni()).await else { return Ok(()) };
     let pw = auth.read_to_end(1024).await?;
     if let Some(p) = &password {
         if pw != p.as_bytes() {
@@ -715,8 +770,29 @@ async fn handle_viewer(
         }
     }
 
+    // Sala de espera: aguarda o transmissor aprovar (até 2 minutos).
+    if approval {
+        let id = NEXT_PENDING.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        DECISIONS.lock().unwrap().insert(id, tx);
+        state::host(|h| h.pending.push((id, shown.to_string())));
+        log(crate::tr!("[espectador] {shown} aguardando aprovação", "[viewer] {shown} waiting for approval"));
+        let approved = tokio::select! {
+            r = tokio::time::timeout(Duration::from_secs(120), rx) => matches!(r, Ok(Ok(true))),
+            _ = conn.closed() => false,
+        };
+        DECISIONS.lock().unwrap().remove(&id);
+        state::host(|h| h.pending.retain(|(p, _)| *p != id));
+        if !approved {
+            log(crate::tr!("[espectador] {shown} não aprovado", "[viewer] {shown} not approved"));
+            conn.close(3u32.into(), b"entrada recusada pelo transmissor");
+            return Ok(());
+        }
+    }
+
     let lagged = Arc::new(AtomicU64::new(0));
     viewers.lock().unwrap().insert(addr, Viewer { conn: conn.clone(), lagged: lagged.clone() });
+    CONNS.lock().unwrap().insert(addr.to_string(), conn.clone());
     log(crate::tr!("[espectador] + {shown} conectado", "[viewer] + {shown} connected"));
 
     let video = {
@@ -757,7 +833,7 @@ async fn handle_viewer(
                 unreachable!()
             };
             let mut s = conn.open_uni().await?;
-            let mut hdr = vec![net::STREAM_AUDIO];
+            let mut hdr = vec![if opus { net::STREAM_AUDIO_OPUS } else { net::STREAM_AUDIO }];
             hdr.extend_from_slice(&rate.to_le_bytes());
             hdr.extend_from_slice(&ch.to_le_bytes());
             s.write_all(&hdr).await?;
@@ -800,6 +876,7 @@ async fn handle_viewer(
         e = conn.closed() => Err(e.into()),
     };
     viewers.lock().unwrap().remove(&addr);
+    CONNS.lock().unwrap().remove(&addr.to_string());
     match res {
         Err(e) => log(crate::tr!("[espectador] - {shown} desconectado ({e})", "[viewer] - {shown} disconnected ({e})")),
         Ok(()) => log(crate::tr!("[espectador] - {shown} desconectado", "[viewer] - {shown} disconnected")),

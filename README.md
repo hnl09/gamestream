@@ -24,10 +24,12 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 
 - **Baixa latência e alta qualidade**: vídeo HEVC codificado pela placa de vídeo (AMD, NVIDIA ou Intel, com detecção automática) e transmitido por QUIC/UDP.
 - **Monitor ou janela específica**: a captura de janela é nativa do Windows e continua funcionando quando a janela é movida, redimensionada ou sobreposta.
-- **Áudio sob controle**: transmita apenas o áudio do jogo ou todo o áudio do sistema **exceto o Discord**, evitando que participantes de uma chamada de voz ouçam o próprio retorno. Microfone opcional.
+- **Áudio sob controle**: transmita apenas o áudio do jogo ou todo o áudio do sistema **exceto o Discord**, evitando que participantes de uma chamada de voz ouçam o próprio retorno. Microfone opcional. Áudio comprimido com **Opus a 160 kbps** (~0,16 Mbps por espectador), com opção sem compressão.
 - **Vários espectadores ao mesmo tempo**: o vídeo é codificado uma única vez e distribuído a todos.
 - **Bitrate adaptativo**: a qualidade se ajusta automaticamente à conexão dos espectadores, ou pode ser fixada manualmente.
-- **Conexão sem configurar o roteador**: IPv6, UPnP, hole punching por código de resposta ou VPN. O convite contém todos os endereços possíveis, e o espectador testa todos em paralelo.
+- **Código de sala curto** (ex.: `KX7-92B`) e **conexão automática**: o espectador digita o código e o aplicativo libera a conexão pelo firewall do transmissor sozinho, sem configurar o roteador. Também funciona por IPv6, UPnP, código de resposta ou VPN.
+- **Sala de espera**: aprove cada espectador antes de exibir a transmissão e remova quem quiser durante a sessão.
+- **Teste de conexão** opcional, que mede o upload e sugere o bitrate.
 - **Segurança**: criptografia TLS 1.3, verificação da identidade do transmissor pelo convite (proteção contra interceptação), senha e código de segurança.
 - **Controles na janela de vídeo**: volume, zoom a partir do cursor, tela cheia e estatísticas em tempo real (ping, FPS, perda de pacotes e taxa recebida).
 - **Pré-visualização local** da transmissão, sem áudio.
@@ -69,11 +71,12 @@ Sem encoder HEVC por hardware, o transmissor usa codificação por CPU, com dese
 1. Na aba **Transmitir**, escolha a fonte de vídeo (**Monitor** ou **Janela específica**) e a fonte de áudio.
 2. Defina a qualidade (**Automático** é o recomendado) e uma **senha**.
 3. Clique em **Iniciar transmissão**. Na primeira vez, o encoder de vídeo (FFmpeg, ~90 MB) é baixado automaticamente.
-4. O convite (`GS-...`) é copiado para a área de transferência. Envie-o aos espectadores e informe a senha por um canal separado.
+4. Envie aos espectadores o **código da sala** (ex.: `KX7-92B`) ou o convite completo (`GS-...`, copiado automaticamente) e informe a senha por um canal separado.
+5. Com a sala de espera ativada, aprove cada espectador no painel **Sala de espera**. Para remover alguém durante a transmissão, use **Remover** na lista de espectadores.
 
 ### Assistir
 
-1. Na aba **Assistir**, cole o convite e informe a senha.
+1. Na aba **Assistir**, digite o código da sala ou cole o convite e informe a senha.
 2. Clique em **Conectar**. O vídeo é exibido em uma janela própria.
 
 | Na janela de vídeo | Ação |
@@ -101,9 +104,10 @@ Sem encoder HEVC por hardware, o transmissor usa codificação por CPU, com dese
 
 O GameStream conecta os computadores diretamente. O convite inclui todos os endereços disponíveis, e o espectador utiliza o primeiro que responder:
 
+1. **Sala (automático)**: o espectador informa o código da sala; o servidor de encontro entrega o convite e avisa o transmissor, que libera a conexão pelo firewall do roteador sem nenhuma ação manual. Funciona na maioria das redes domésticas, especialmente com IPv6.
 1. **IPv6**: oferecido pela maioria das operadoras. Se transmissor e espectador tiverem IPv6, a conexão costuma funcionar sem nenhuma configuração.
 2. **UPnP**: o aplicativo solicita ao roteador a abertura automática da porta UDP 9000.
-3. **Código de resposta (hole punching)**: se a conexão direta não responder, o espectador recebe um código `GS-R-...` para enviar ao transmissor, que o cola em **Liberar espectador**. O transmissor envia pacotes ao espectador, o firewall do roteador passa a aceitar a conexão, e o espectador conecta automaticamente. É especialmente eficaz com IPv6, mesmo quando o modem bloqueia conexões de entrada.
+3. **Código de resposta (hole punching manual)**: se a sala estiver indisponível e a conexão direta não responder, o espectador recebe um código `GS-R-...` para enviar ao transmissor, que o cola em **Liberar espectador**. O transmissor envia pacotes ao espectador, o firewall do roteador passa a aceitar a conexão, e o espectador conecta automaticamente. É especialmente eficaz com IPv6, mesmo quando o modem bloqueia conexões de entrada.
 4. **VPN** ([Tailscale](https://tailscale.com) ou [Radmin VPN](https://www.radmin-vpn.com)): funciona em qualquer cenário, inclusive com CGNAT. Com todos na mesma rede virtual, o endereço da VPN entra no convite automaticamente.
 5. **Redirecionamento manual** da porta **UDP 9000** no roteador.
 
@@ -114,7 +118,9 @@ Na primeira execução, permita o acesso do GameStream à rede quando o Firewall
 - **Conexão criptografada**: vídeo, áudio e senha trafegam diretamente entre os computadores por QUIC com TLS 1.3.
 - **Proteção contra interceptação**: o convite contém a impressão digital do certificado do transmissor; conexões com qualquer outro computador são recusadas. Transmissor e espectadores podem conferir o mesmo **código de segurança**.
 - **Senha**: enviada somente após a verificação da identidade do transmissor. Cada tentativa incorreta é atrasada em 1 segundo.
-- **Sem servidores, sem conta e sem coleta de dados**: a transmissão ocorre diretamente entre os computadores. Além dessa conexão, o aplicativo acessa apenas o GitHub (verificação de atualizações e download do FFmpeg) e o seu roteador (UPnP, se ativado).
+- **Sem conta e sem coleta de dados**: a transmissão ocorre diretamente entre os computadores. Além dessa conexão, o aplicativo acessa apenas o GitHub (atualizações e download do FFmpeg), o seu roteador (UPnP, se ativado) e o **servidor de encontro** (Cloudflare Worker, código em [`worker/`](worker/)).
+- **Servidor de encontro**: recebe somente os endereços de rede necessários para conectar transmissor e espectador; vídeo, áudio e senha nunca passam por ele, e nada é registrado. O código da sala é derivado da identidade do transmissor, e o aplicativo do espectador confere essa correspondência, de modo que nem o servidor consegue redirecionar a conexão para outro computador.
+- **Sala de espera**: com ela ativada, ninguém recebe a transmissão sem a sua aprovação, mesmo conhecendo o código e a senha.
 - **Endereço IP**: como em qualquer conexão direta, os espectadores conseguem ver o endereço IP do transmissor. Para não expô-lo, utilize uma VPN.
 - A identidade do transmissor é um certificado gerado localmente e armazenado em `%APPDATA%\GameStream`.
 
@@ -196,6 +202,19 @@ WASAPI (por aplicativo + microfone) ─► mixer ──────────�
 | `src/updater.rs` | atualização automática e download do FFmpeg |
 | `src/gui.rs` | interface gráfica (egui) |
 | `assets/overlay.lua` | painel da janela de vídeo |
+
+### Servidor de encontro
+
+O servidor fica em [`worker/`](worker/) e roda no plano gratuito do Cloudflare Workers (Durable Objects com SQLite). Para publicar uma instância própria:
+
+```powershell
+cd worker
+npm install
+npx wrangler login    # entra na sua conta Cloudflare (gratuita)
+npx wrangler deploy   # mostra o endereço https://gamestream-rendezvous.<sua-conta>.workers.dev
+```
+
+O endereço padrão fica em `DEFAULT_SERVER` (`src/room.rs`) e pode ser substituído pela variável de ambiente `GAMESTREAM_SERVER`. Para testar localmente: `npx wrangler dev`.
 
 ### Publicação de versões
 

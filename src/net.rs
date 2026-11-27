@@ -20,6 +20,8 @@ pub const STREAM_VIDEO: u8 = 1;
 pub const STREAM_AUDIO: u8 = 2;
 /// Estatísticas que o host mede para cada viewer (perda de pacotes, bitrate alvo), 1 linha por segundo.
 pub const STREAM_STATS: u8 = 3;
+/// Áudio comprimido com Opus (mesmo cabeçalho do PCM: taxa u32 + canais u16; depois pacotes Opus).
+pub const STREAM_AUDIO_OPUS: u8 = 4;
 
 pub struct Identity {
     cert: Vec<u8>,
@@ -108,7 +110,13 @@ pub async fn punch(sock: &std::net::UdpSocket, targets: &[SocketAddr]) {
 }
 
 /// `pin` = impressão digital esperada do host (vem do convite). Sem pin, aceita qualquer host.
-pub fn client_endpoint(pin: Option<[u8; 32]>) -> Result<Endpoint> {
+/// Socket do espectador sem configuração de segurança (a porta local é necessária antes de
+/// conhecer a identidade do transmissor, quando se entra por código de sala).
+pub fn client_bind() -> Result<Endpoint> {
+    Ok(Endpoint::new(EndpointConfig::default(), None, bind_dual(0)?, Arc::new(quinn::TokioRuntime))?)
+}
+
+pub fn client_config(pin: Option<[u8; 32]>) -> Result<ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let crypto = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
@@ -117,9 +125,7 @@ pub fn client_endpoint(pin: Option<[u8; 32]>) -> Result<Endpoint> {
         .with_no_client_auth();
     let mut cfg = ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?));
     cfg.transport_config(transport());
-    let mut ep = Endpoint::new(EndpointConfig::default(), None, bind_dual(0)?, Arc::new(quinn::TokioRuntime))?;
-    ep.set_default_client_config(cfg);
-    Ok(ep)
+    Ok(cfg)
 }
 
 /// Código curto (ex: "7F3A-91C2-0BDE") da impressão digital, para conferir por voz.

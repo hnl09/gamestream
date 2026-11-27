@@ -37,14 +37,19 @@ TRANSMITIR
      Na primeira transmissão, o aplicativo faz o download do encoder de vídeo
      (FFmpeg, aproximadamente 90 MB).
 
-  5. O convite (GS-...) é copiado automaticamente para a área de
-     transferência. Compartilhe-o com os espectadores e envie a senha por um
-     canal separado.
+  5. Compartilhe o CÓDIGO DA SALA (ex.: KX7-92B) ou o convite completo
+     (GS-..., copiado automaticamente) e envie a senha por um canal separado.
+     Com o código da sala, a conexão é liberada automaticamente.
+  6. Sala de espera (ativada por padrão): cada espectador aparece no painel
+     "Sala de espera" e só recebe a transmissão depois de aprovado. Durante a
+     transmissão, "Remover" desconecta e bloqueia um espectador.
+  Opcional: "Testar conexão" (em Qualidade) mede o upload e sugere o bitrate.
 
 ------------------------------------------------------------
 ASSISTIR
 ------------------------------------------------------------
-  1. Cole o convite GS-..., informe a senha e selecione a saída de áudio.
+  1. Digite o código da sala (ou cole o convite GS-...), informe a senha e
+     selecione a saída de áudio.
   2. Clique em "Conectar". O vídeo é exibido em uma janela própria.
   3. Controles na janela de vídeo:
        - Mover o mouse: exibe o painel no canto inferior direito (silenciar,
@@ -95,6 +100,10 @@ CONEXÃO PELA INTERNET
 ------------------------------------------------------------
   O convite contém todos os endereços disponíveis; o aplicativo do espectador
   testa todos simultaneamente e utiliza o primeiro que responder.
+
+  0) Sala (automático): ao usar o código da sala, o servidor de encontro avisa
+     o transmissor, que libera a conexão pelo firewall do roteador sozinho.
+     O servidor só troca endereços; vídeo, áudio e senha não passam por ele.
 
   1) IPv6: a maioria das operadoras já oferece IPv6. Se transmissor e
      espectador tiverem IPv6, a conexão normalmente funciona sem configuração.

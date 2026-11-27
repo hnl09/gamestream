@@ -17,6 +17,15 @@ pub fn t(pt: &'static str) -> &'static str {
     }
 }
 
+/// Tradução de um texto vindo de fora (ex.: motivo enviado pelo transmissor).
+pub fn t_dyn(pt: &str) -> String {
+    if is_en() {
+        TABLE.get(pt).copied().unwrap_or(pt).to_string()
+    } else {
+        pt.to_string()
+    }
+}
+
 /// `format!` com versões em português e inglês (mesmos marcadores, na mesma ordem).
 #[macro_export]
 macro_rules! tr {
@@ -26,6 +35,35 @@ macro_rules! tr {
 }
 
 const PAIRS: &[(&str, &str)] = &[
+    ("[sala] conectada ao servidor de encontro: espectadores conectam automaticamente.", "[room] connected to the rendezvous server: viewers connect automatically."),
+    ("sala não encontrada ou transmissão encerrada", "room not found or stream ended"),
+    ("sem conexão com o servidor de encontro", "no connection to the rendezvous server"),
+    ("servidor de encontro não configurado; use o convite GS-...", "rendezvous server not configured; use the GS-... invite"),
+    ("o convite recebido não corresponde ao código da sala", "the received invite does not match the room code"),
+    ("[sala] transmissor avisado; liberando a conexão automaticamente.", "[room] streamer notified; allowing the connection automatically."),
+    ("Aguardando aprovação do transmissor...", "Waiting for the streamer's approval..."),
+    ("Áudio sem compressão (PCM)", "Uncompressed audio (PCM)"),
+    ("Por padrão o áudio usa Opus a 160 kbps, qualidade considerada transparente, com ~0,16 Mbps por espectador. Sem compressão usa ~1,5 Mbps por espectador.", "By default audio uses Opus at 160 kbps, considered transparent quality, at ~0.16 Mbps per viewer. Uncompressed uses ~1.5 Mbps per viewer."),
+    ("Sala de espera: aprovar cada espectador antes de exibir a transmissão", "Waiting room: approve each viewer before showing the stream"),
+    ("Código da sala", "Room code"),
+    ("Copiar código da sala", "Copy room code"),
+    ("online", "online"),
+    ("conectando ao servidor...", "connecting to the server..."),
+    ("Espectadores podem digitar o código da sala ou colar o convite completo; a conexão é liberada automaticamente.", "Viewers can type the room code or paste the full invite; the connection is allowed automatically."),
+    ("Sala de espera", "Waiting room"),
+    ("Recusar", "Decline"),
+    ("Aprovar", "Approve"),
+    ("Remover", "Remove"),
+    ("Desconecta e bloqueia até o fim da transmissão", "Disconnects and blocks until the end of the stream"),
+    ("Cole o convite (GS-...) ou digite o código da sala (ex.: KX7-92B)", "Paste the invite (GS-...) or type the room code (e.g. KX7-92B)"),
+    ("📶 Testar conexão", "📶 Test connection"),
+    ("Medindo o upload (cerca de 6 segundos)...", "Measuring upload (about 6 seconds)..."),
+    ("Espectadores esperados:", "Expected viewers:"),
+    ("Medido até o servidor mais próximo; a velocidade até cada espectador pode ser menor.", "Measured to the nearest server; the speed to each viewer may be lower."),
+    ("entrada recusada pelo transmissor", "entry declined by the streamer"),
+    ("removido pelo transmissor", "removed by the streamer"),
+    ("transmissao encerrada pelo host", "stream ended by the host"),
+    ("resposta inesperada do servidor", "unexpected response from the server"),
     ("Idioma", "Language"),
     ("Tema", "Theme"),
     ("Idioma e tema", "Language and theme"),

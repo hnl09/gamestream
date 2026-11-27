@@ -3,3 +3,5 @@
 *.zip
 *.hevc
 /out
+/worker/node_modules
+/worker/.wrangler

@@ -269,10 +269,15 @@ where
 
 /// Começa a capturar: a fonte principal e, opcionalmente, o microfone, misturados a cada 10 ms.
 /// Envia pacotes já enquadrados (`[u32 len][pcm i16]`), 48 kHz estéreo. Retorna (pipeline, rate, canais).
+/// Bitrate do Opus: 160 kbps estéreo, faixa considerada transparente em testes de audição.
+pub const OPUS_BITRATE: i32 = 160_000;
+
+/// `opus`: comprime cada pacote de 10 ms com Opus (~0,16 Mbps) em vez de PCM (~1,5 Mbps).
 pub fn start_capture(
     tx: broadcast::Sender<Bytes>,
     main: CaptureSource,
     mic: Option<(String, f32)>,
+    opus: bool,
 ) -> Result<(CapturePipeline, u32, u16)> {
     let stop = Arc::new(AtomicBool::new(false));
     let mut streams = Vec::new();
@@ -297,13 +302,21 @@ pub fn start_capture(
     }
 
     let stop2 = stop.clone();
-    std::thread::spawn(move || mixer(queues, tx, stop2));
+    let encoder = if opus {
+        let mut e = opus::Encoder::new(MIX_RATE, opus::Channels::Stereo, opus::Application::Audio)?;
+        e.set_bitrate(opus::Bitrate::Bits(OPUS_BITRATE))?;
+        Some(e)
+    } else {
+        None
+    };
+    std::thread::spawn(move || mixer(queues, tx, stop2, encoder));
     Ok((CapturePipeline { stop, _streams: streams }, MIX_RATE, MIX_CH))
 }
 
 /// Soma as fontes num relógio próprio (10 ms por pacote). Cada fonte só entra depois de juntar
 /// 40 ms (buffer de jitter), e volta a esperar se esvaziar.
-fn mixer(sources: Vec<(Queue, f32)>, tx: broadcast::Sender<Bytes>, stop: Arc<AtomicBool>) {
+fn mixer(sources: Vec<(Queue, f32)>, tx: broadcast::Sender<Bytes>, stop: Arc<AtomicBool>, mut opus: Option<opus::Encoder>) {
+    let mut packet = vec![0u8; 4000];
     const FRAMES: usize = 480; // 10 ms
     let samples = FRAMES * MIX_CH as usize;
     let prime = (MIX_RATE as usize * MIX_CH as usize) / 25; // 40 ms
@@ -334,11 +347,23 @@ fn mixer(sources: Vec<(Queue, f32)>, tx: broadcast::Sender<Bytes>, stop: Arc<Ato
                     }
                 }
             }
-            let mut out = Vec::with_capacity(4 + samples * 2);
-            out.extend_from_slice(&((samples * 2) as u32).to_le_bytes());
-            for &s in &mix {
-                out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
-            }
+            let out = if let Some(enc) = opus.as_mut() {
+                mix.iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));
+                match enc.encode_float(&mix, &mut packet) {
+                    Ok(n) => crate::net::frame(&packet[..n]),
+                    Err(_) => {
+                        produced += FRAMES as u64;
+                        continue;
+                    }
+                }
+            } else {
+                let mut out = Vec::with_capacity(4 + samples * 2);
+                out.extend_from_slice(&((samples * 2) as u32).to_le_bytes());
+                for &s in &mix {
+                    out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+                }
+                out
+            };
             let _ = tx.send(Bytes::from(out));
             produced += FRAMES as u64;
         }
@@ -386,6 +411,24 @@ pub fn start_player(in_rate: u32, in_ch: u16, device: Option<String>) -> Result<
 
 impl Player {
     /// Recebe PCM i16 LE intercalado do host; adapta taxa (vizinho mais próximo) e nº de canais.
+    /// Recebe amostras f32 intercaladas (áudio Opus já decodificado).
+    pub fn push_f32(&mut self, pcm: &[f32]) {
+        let frames = pcm.len() / self.in_ch;
+        if frames == 0 {
+            return;
+        }
+        self.scratch.clear();
+        while self.pos < frames as f64 {
+            let i = self.pos as usize;
+            for c in 0..self.out_ch {
+                self.scratch.push(pcm[i * self.in_ch + c.min(self.in_ch - 1)]);
+            }
+            self.pos += self.step;
+        }
+        self.pos -= frames as f64;
+        self.queue.lock().unwrap().extend(self.scratch.iter().copied());
+    }
+
     pub fn push(&mut self, pcm: &[u8]) {
         let frames = pcm.len() / 2 / self.in_ch;
         if frames == 0 {

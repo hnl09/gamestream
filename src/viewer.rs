@@ -116,24 +116,57 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
 }
 
 async fn run_inner(o: ViewOpts) -> Result<()> {
-    let inv = invite::decode(&o.invite, net::DEFAULT_PORT).await?;
-    if inv.fingerprint.is_none() {
-        log(crate::i18n::t("Aviso: conexão por IP direto, sem verificação da identidade do transmissor. Recomenda-se usar o convite GS-..."));
-    }
     view_phase(ViewPhase::Connecting, crate::i18n::t("Conectando..."));
-    log(crate::tr!("Conectando ({} endereço(s))...", "Connecting ({} address(es))...", inv.addrs.len()));
-    let ep = net::client_endpoint(inv.fingerprint)?;
-
-    // Tenta todos os endereços em paralelo, repetindo a cada 2 s pela mesma porta local. Se a conexão
-    // direta não responder, exibe o código de resposta: quando o transmissor o usa ("Liberar
-    // espectador"), o firewall dele passa a aceitar estas tentativas (hole punching).
+    let mut ep = net::client_bind()?;
     let local_port = ep.local_addr()?.port();
     let reply_addrs: Vec<SocketAddr> = invite::local_addrs(local_port)
         .into_iter()
         .filter(|(_, kind, _)| kind.is_internet())
         .map(|(a, _, _)| a)
         .collect();
+
+    // Código de sala (ex.: KX7-92B): o servidor de encontro devolve o convite do transmissor e o avisa
+    // para liberar a conexão. O código é conferido contra a identidade recebida, então o servidor não
+    // consegue redirecionar para outro transmissor.
+    let server = crate::room::server();
+    let mut room_notified = false;
+    let inv = if let Some(code) = crate::room::parse_code(&o.invite) {
+        let server = server.clone().context(crate::i18n::t("servidor de encontro não configurado; use o convite GS-..."))?;
+        log(crate::tr!("Procurando a sala {}...", "Looking up room {}...", crate::room::display(&code)));
+        let (s, c, r) = (server, code.clone(), reply_addrs.clone());
+        let invite_text = tokio::task::spawn_blocking(move || crate::room::join(&s, &c, &r)).await??;
+        let inv = invite::decode(&invite_text, net::DEFAULT_PORT).await?;
+        let fp = inv.fingerprint.context(crate::i18n::t("convite inválido"))?;
+        if crate::room::code_from_fp(&fp) != code {
+            bail!("{}", crate::i18n::t("o convite recebido não corresponde ao código da sala"));
+        }
+        room_notified = true;
+        inv
+    } else {
+        let inv = invite::decode(&o.invite, net::DEFAULT_PORT).await?;
+        // Convite completo: avisa o transmissor pela sala dele (se estiver aberta), em segundo plano.
+        if let (Some(server), Some(fp)) = (server.clone(), inv.fingerprint) {
+            let (code, r) = (crate::room::code_from_fp(&fp), reply_addrs.clone());
+            let ok = tokio::task::spawn_blocking(move || crate::room::join(&server, &code, &r).is_ok());
+            room_notified = tokio::time::timeout(Duration::from_secs(3), ok).await.is_ok_and(|r| r.unwrap_or(false));
+        }
+        inv
+    };
+    if inv.fingerprint.is_none() {
+        log(crate::i18n::t("Aviso: conexão por IP direto, sem verificação da identidade do transmissor. Recomenda-se usar o convite GS-..."));
+    }
+    if room_notified {
+        log(crate::i18n::t("[sala] transmissor avisado; liberando a conexão automaticamente."));
+    }
+    log(crate::tr!("Conectando ({} endereço(s))...", "Connecting ({} address(es))...", inv.addrs.len()));
+    ep.set_default_client_config(net::client_config(inv.fingerprint)?);
+
+    // Tenta todos os endereços em paralelo, repetindo a cada 2 s pela mesma porta local. Se a conexão
+    // direta não responder, exibe o código de resposta: quando o transmissor o usa ("Liberar
+    // espectador"), o firewall dele passa a aceitar estas tentativas (hole punching). Com a sala, a
+    // liberação já foi pedida automaticamente e o código de resposta só aparece se demorar.
     let reply_code = (!reply_addrs.is_empty()).then(|| invite::encode_reply(&reply_addrs));
+    let show_reply_after = Duration::from_secs(if room_notified { 10 } else { 3 });
     let wait_total = if inv.fingerprint.is_some() && reply_code.is_some() { 180 } else { 8 };
     let start = std::time::Instant::now();
     let mut tries = JoinSet::new();
@@ -151,7 +184,7 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
             }
             next_round += Duration::from_secs(2);
         }
-        if !shown && start.elapsed() >= Duration::from_secs(3) {
+        if !shown && start.elapsed() >= show_reply_after {
             if let Some(code) = &reply_code {
                 shown = true;
                 log(crate::tr!("A conexão direta não respondeu. Envie este código de resposta ao transmissor \
@@ -198,11 +231,24 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         if verified { crate::i18n::t("identidade verificada pelo convite") } else { crate::i18n::t("identidade não verificada") }
     ));
     state::view(|v| {
-        v.phase = ViewPhase::Connected;
-        v.text = crate::i18n::t("Conectado").into();
+        v.text = crate::i18n::t("Aguardando aprovação do transmissor...").into();
         v.peer = via.clone();
         v.code = code.clone();
         v.verified = verified;
+        v.reply_code = None;
+    });
+    // O primeiro fluxo só chega quando o transmissor aprova a entrada (sala de espera).
+    let first = match conn.accept_uni().await {
+        Ok(s) => s,
+        Err(quinn::ConnectionError::ApplicationClosed(c)) => bail!(
+            "{}",
+            crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason)))
+        ),
+        Err(e) => bail!("{}", crate::tr!("conexão com o transmissor perdida: {e}", "connection to the streamer lost: {e}")),
+    };
+    state::view(|v| {
+        v.phase = ViewPhase::Connected;
+        v.text = crate::i18n::t("Conectado").into();
     });
 
     let pipe = format!(r"\\.\pipe\gamestream-mpv-{}", std::process::id());
@@ -224,16 +270,43 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (mut last_frames, mut last_bytes, mut last_t) = (0u64, 0u64, std::time::Instant::now());
+    let mut pending_first = Some(first);
     let result = loop {
-        tokio::select! {
-            st = conn.accept_uni() => {
-                let mut st = match st {
+        let mut st = if let Some(s) = pending_first.take() {
+            s
+        } else {
+            tokio::select! {
+                st = conn.accept_uni() => match st {
                     Ok(s) => s,
                     Err(quinn::ConnectionError::ApplicationClosed(c)) => {
-                        break Err(anyhow!("{}", crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", String::from_utf8_lossy(&c.reason))));
+                        break Err(anyhow!("{}", crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason)))));
                     }
                     Err(e) => break Err(anyhow!("{}", crate::tr!("conexão com o transmissor perdida: {e}", "connection to the streamer lost: {e}"))),
-                };
+                },
+                Some(r) = tasks.join_next() => {
+                    break match r? {
+                        Ok(()) => { log(crate::i18n::t("O transmissor encerrou a transmissão.")); Ok(()) }
+                        Err(e) => Err(anyhow!("{}", crate::tr!("transmissão interrompida: {e:#}", "stream interrupted: {e:#}"))),
+                    };
+                }
+                _ = child.wait() => { log(crate::i18n::t("Janela de vídeo fechada.")); break Ok(()); }
+                _ = &mut control => { continue; }
+                _ = tick.tick() => {
+                    let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
+                    let dt = last_t.elapsed().as_secs_f64().max(0.2);
+                    let ping = conn.stats().path.rtt.as_millis() as u32;
+                    state::view(|v| {
+                        v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;
+                        v.stats.mbps = (b - last_bytes) as f64 * 8.0 / 1e6 / dt;
+                        v.stats.ping_ms = ping;
+                    });
+                    (last_frames, last_bytes, last_t) = (f, b, std::time::Instant::now());
+                    continue;
+                }
+            }
+        };
+        {
+            {
                 let mut kind = [0u8; 1];
                 st.read_exact(&mut kind).await?;
                 match kind[0] {
@@ -289,27 +362,31 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                             Err(e) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
                         }
                     }
+                    net::STREAM_AUDIO_OPUS => {
+                        let mut hdr = [0u8; 6];
+                        st.read_exact(&mut hdr).await?;
+                        let rate = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+                        let ch = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
+                        let channels = if ch == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                        match (opus::Decoder::new(rate, channels), audio::start_player(rate, ch, audio_device.clone())) {
+                            (Ok(mut dec), Ok(mut player)) => {
+                                tasks.spawn(async move {
+                                    let mut buf = Vec::new();
+                                    let mut pcm = vec![0f32; 5760 * ch.max(1) as usize];
+                                    while net::read_msg(&mut st, &mut buf).await? {
+                                        if let Ok(n) = dec.decode_float(&buf, &mut pcm, false) {
+                                            player.push_f32(&pcm[..n * ch.max(1) as usize]);
+                                        }
+                                    }
+                                    anyhow::Ok(())
+                                });
+                            }
+                            (Err(e), _) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
+                            (_, Err(e)) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
+                        }
+                    }
                     k => log(crate::tr!("fluxo desconhecido: {k}", "unknown stream: {k}")),
                 }
-            }
-            Some(r) = tasks.join_next() => {
-                break match r? {
-                    Ok(()) => { log(crate::i18n::t("O transmissor encerrou a transmissão.")); Ok(()) }
-                    Err(e) => Err(anyhow!("{}", crate::tr!("transmissão interrompida: {e:#}", "stream interrupted: {e:#}"))),
-                };
-            }
-            _ = child.wait() => { log(crate::i18n::t("Janela de vídeo fechada.")); break Ok(()); }
-            _ = &mut control => {}
-            _ = tick.tick() => {
-                let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
-                let dt = last_t.elapsed().as_secs_f64().max(0.2);
-                let ping = conn.stats().path.rtt.as_millis() as u32;
-                state::view(|v| {
-                    v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;
-                    v.stats.mbps = (b - last_bytes) as f64 * 8.0 / 1e6 / dt;
-                    v.stats.ping_ms = ping;
-                });
-                (last_frames, last_bytes, last_t) = (f, b, std::time::Instant::now());
             }
         }
     };
