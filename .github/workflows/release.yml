@@ -19,6 +19,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Compilar
+        # A libopus embutida declara cmake_minimum_required(3.1); o CMake 4 só aceita com esta política.
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: cargo build --release
 
       - name: Baixar FFmpeg e mpv
