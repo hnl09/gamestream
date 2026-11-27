@@ -37,7 +37,8 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Quem está na sala**: avatares de todos os conectados no canto do vídeo, como no Discord (passe o mouse para ver o nome). Cada pessoa escolhe um **nome** (até 24 caracteres, com emojis) e uma **foto** (PNG, JPG, WebP ou GIF de até 8 MB, reduzida para 128×128). A foto fica no seu PC e vai direto para quem está na sala, sem servidor.
 - **Jogar junto (controle remoto, opcional)**: o espectador pede para jogar com o controle ou com teclado e mouse, e o transmissor permite ou revoga a qualquer momento. O controle vira um controle de Xbox 360 virtual no PC do transmissor (requer o driver [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)); teclado e mouse funcionam sem instalar nada (F8 liga e desliga na janela do vídeo).
 - **Reconexão automática**: se a conexão cair, o espectador volta sozinho em alguns segundos, na mesma janela de vídeo e sem passar de novo pela sala de espera.
-- **Salas recentes**: as salas em que você entrou ficam na aba Assistir para reconectar com um clique.
+- **Salas recentes**: as salas em que você entrou ficam na aba Assistir, com a foto de quem transmite e o selo **AO VIVO** quando a pessoa está transmitindo; entre com um clique.
+- **Lembra as suas escolhas**: fonte, áudio, qualidade e demais opções voltam como você deixou (a senha nunca é salva).
 - **Painel por espectador**: ping, perda de pacotes e taxa de cada espectador, além dos pedidos de controle.
 - **Pré-visualização local** da transmissão, sem áudio.
 - **Atualização automática, como no Discord**: ao abrir, o aplicativo instala a versão nova (conferida por SHA-256) e reabre sozinho. Com o app aberto, só atualiza se não houver transmissão nem conexão ativa. Ao conectar, transmissor e espectador trocam a versão e o app avisa quando um dos lados está desatualizado.
@@ -126,6 +127,7 @@ Na primeira execução, permita o acesso do GameStream à rede quando o Firewall
 - **Proteção contra interceptação**: o convite contém a impressão digital do certificado do transmissor; conexões com qualquer outro computador são recusadas. Transmissor e espectadores podem conferir o mesmo **código de segurança**.
 - **Senha**: enviada somente após a verificação da identidade do transmissor. Cada tentativa incorreta é atrasada em 1 segundo.
 - **Sem conta e sem coleta de dados**: a transmissão ocorre diretamente entre os computadores. Além dessa conexão, o aplicativo acessa apenas o GitHub (atualizações e download do FFmpeg), o seu roteador (UPnP, se ativado) e o **servidor de encontro** (Cloudflare Worker, código em [`worker/`](worker/)).
+- **Proteção contra abuso no servidor de encontro**: limite de pedidos por IP (60 por minuto; teste de conexão, 20), para ninguém esgotar a cota gratuita.
 - **Servidor de encontro**: recebe somente os endereços de rede necessários para conectar transmissor e espectador; vídeo, áudio e senha nunca passam por ele, e nada é registrado. O código da sala é derivado da identidade do transmissor, e o aplicativo do espectador confere essa correspondência, de modo que nem o servidor consegue redirecionar a conexão para outro computador.
 - **Sala de espera**: com ela ativada, ninguém recebe a transmissão sem a sua aprovação, mesmo conhecendo o código e a senha.
 - **Chat, nome e foto**: trafegam pela mesma conexão criptografada, diretamente entre os computadores; nada passa pelo servidor de encontro. Fotos recebidas são validadas (PNG de até 96 KB e 256×256) antes de serem exibidas.

@@ -217,7 +217,44 @@ pub fn join(server: &str, code: &str, reply: &[SocketAddr]) -> Result<String> {
     Ok(v["invite"].as_str().context(crate::i18n::t("resposta inesperada do servidor"))?.to_string())
 }
 
+/// Quais salas estão ao vivo agora (para a lista de salas recentes). Códigos sem hífen.
+pub fn status(server: &str, codes: &[String]) -> Result<std::collections::HashMap<String, bool>> {
+    let body = serde_json::json!({ "codes": codes });
+    let text = agent()
+        .post(&format!("{server}/v1/status"))
+        .set("content-type", "application/json")
+        .send_string(&body.to_string())?
+        .into_string()?;
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    Ok(v["live"]
+        .as_object()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_bool() == Some(true))).collect())
+        .unwrap_or_default())
+}
+
 // ---------- teste de velocidade ----------
+
+/// Corpo do teste de velocidade: repete os dados até o prazo (ou até `max` bytes).
+struct DeadlineReader {
+    data: Arc<Vec<u8>>,
+    pos: usize,
+    sent: usize,
+    max: usize,
+    deadline: Instant,
+}
+
+impl std::io::Read for DeadlineReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.sent >= self.max || Instant::now() >= self.deadline {
+            return Ok(0);
+        }
+        let n = buf.len().min(self.data.len() - self.pos).min(self.max - self.sent).min(256 << 10);
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos = (self.pos + n) % self.data.len();
+        self.sent += n;
+        Ok(n)
+    }
+}
 
 /// Mede o upload até o servidor (Cloudflare mais próximo) por ~`secs` segundos, com 4 conexões.
 pub fn speedtest(server: &str, secs: f64) -> Result<f64> {
@@ -240,8 +277,11 @@ pub fn speedtest(server: &str, secs: f64) -> Result<f64> {
         let (data, total, url) = (data.clone(), total.clone(), format!("{server}/v1/speedtest"));
         handles.push(std::thread::spawn(move || -> Result<()> {
             let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build();
+            // Um envio contínuo por conexão (poucos pedidos ao servidor, que limita pedidos por IP).
+            // Cada envio vai até o prazo ou até 90 MB (limite de corpo da Cloudflare no plano gratuito).
             while Instant::now() < deadline {
-                let r = a.post(&url).set("content-type", "application/octet-stream").send_bytes(&data)?;
+                let body = DeadlineReader { data: data.clone(), pos: 0, sent: 0, max: 90 << 20, deadline };
+                let r = a.post(&url).set("content-type", "application/octet-stream").send(body)?;
                 let v: serde_json::Value = serde_json::from_str(&r.into_string()?)?;
                 total.fetch_add(v["bytes"].as_u64().unwrap_or(0), Ordering::Relaxed);
             }

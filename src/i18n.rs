@@ -336,4 +336,5 @@ const PAIRS: &[(&str, &str)] = &[
     ("O GameStream reabre sozinho em seguida.", "GameStream will reopen by itself right after."),
     ("Procurando atualizações...", "Checking for updates..."),
     ("O transmissor usa uma versão antiga do GameStream: chat, lista da sala e jogar junto ficam indisponíveis. Peça para ele abrir o app de novo para atualizar.", "The streamer uses an old GameStream version: chat, room list and play together are unavailable. Ask them to reopen the app to update."),
+    ("offline", "offline"),
 ];

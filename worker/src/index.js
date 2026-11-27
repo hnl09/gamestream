@@ -8,6 +8,10 @@
 //   GET  /v1/room/<CODE>/host          -> WebSocket do transmissor (mantém a sala aberta)
 //   POST /v1/room/<CODE>/join          -> espectador: {"reply":[...]} -> {"invite":"GS-..."}
 //   POST /v1/speedtest                 -> descarta o corpo e devolve {"bytes":N}
+//   POST /v1/status                    -> {"codes":["KX792B",...]} -> {"live":{"KX792B":true,...}}
+//
+// Proteção contra abuso (o plano gratuito tem cota diária): limite de pedidos por IP
+// (60 por minuto; teste de conexão: 20 envios por minuto). Acima disso, responde 429.
 
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // sem 0/O/1/I/L
 const CODE_RE = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/;
@@ -54,6 +58,21 @@ function fingerprintFromInvite(invite) {
   return fp.length === 32 ? fp : null;
 }
 
+// Limite por IP (binding de rate limiting da Cloudflare). Sem o binding (ex.: wrangler dev), não limita.
+async function allowed(env, request, heavy) {
+  const limiter = heavy ? env.HEAVY : env.LIMITER;
+  if (!limiter) return true;
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  try {
+    const { success } = await limiter.limit({ key: ip });
+    return success;
+  } catch {
+    return true; // falha do limitador não derruba o serviço
+  }
+}
+
+const MAX_STATUS_CODES = 8;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -61,6 +80,36 @@ export default {
     if (parts[0] !== "v1") return json({ error: "not found" }, 404);
 
     if (parts[1] === "health") return json({ ok: true });
+
+    if (!(await allowed(env, request, parts[1] === "speedtest"))) {
+      return json({ error: "too many requests" }, 429);
+    }
+
+    // Quais salas estão ao vivo agora (lista de salas recentes do app).
+    if (parts[1] === "status" && request.method === "POST") {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch {}
+      const codes = (Array.isArray(body.codes) ? body.codes : [])
+        .filter((c) => typeof c === "string")
+        .map((c) => c.toUpperCase())
+        .filter((c) => CODE_RE.test(c))
+        .slice(0, MAX_STATUS_CODES);
+      const live = {};
+      await Promise.all(
+        codes.map(async (code) => {
+          try {
+            const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
+            const r = await stub.fetch(new Request(`${url.origin}/v1/room/${code}/status`));
+            live[code] = ((await r.json()) || {}).live === true;
+          } catch {
+            live[code] = false;
+          }
+        }),
+      );
+      return json({ live });
+    }
 
     if (parts[1] === "speedtest" && request.method === "POST") {
       let bytes = 0;
@@ -102,6 +151,10 @@ export class Room {
       this.ctx.acceptWebSocket(pair[1]);
       pair[1].serializeAttachment({ code: code.toUpperCase(), ready: false });
       return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+
+    if (action === "status") {
+      return json({ live: this.hosts().length > 0 });
     }
 
     if (action === "join" && request.method === "POST") {

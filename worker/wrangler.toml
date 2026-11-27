@@ -12,5 +12,23 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
+# Limite de pedidos por IP (proteção da cota gratuita contra spam).
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "7301"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+# Teste de conexão (cada teste usa 4 envios contínuos): até 5 testes por minuto por IP.
+[[ratelimits]]
+name = "HEAVY"
+namespace_id = "7302"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
 [observability]
 enabled = false

@@ -28,6 +28,8 @@ pub struct Recent {
 struct Extra {
     nick: String,
     recent: Vec<Recent>,
+    /// Últimas escolhas da interface (fonte, áudio, qualidade...). Nunca inclui a senha.
+    prefs: serde_json::Value,
 }
 
 static EXTRA: LazyLock<Mutex<Extra>> = LazyLock::new(|| Mutex::new(Extra::default()));
@@ -100,6 +102,7 @@ fn init() {
         THEME.store(Theme::ALL.iter().position(|t| *t == theme).unwrap_or(0) as u8, Ordering::Relaxed);
         let mut x = EXTRA.lock().unwrap();
         x.nick = crate::control::clean_name(saved["nick"].as_str().unwrap_or(""));
+        x.prefs = saved["prefs"].clone();
         x.recent = saved["recent"]
             .as_array()
             .map(|a| {
@@ -119,20 +122,21 @@ fn init() {
 }
 
 fn save() {
-    let (nick, recent) = {
+    let (nick, recent, prefs) = {
         let x = EXTRA.lock().unwrap();
         let recent: Vec<serde_json::Value> = x
             .recent
             .iter()
             .map(|r| serde_json::json!({ "code": r.code, "name": r.name, "last": r.last }))
             .collect();
-        (x.nick.clone(), recent)
+        (x.nick.clone(), recent, x.prefs.clone())
     };
     let v = serde_json::json!({
         "lang": if is_en() { "en" } else { "pt" },
         "theme": theme().id(),
         "nick": nick,
         "recent": recent,
+        "prefs": prefs,
     });
     let p = path();
     if let Some(dir) = p.parent() {
@@ -189,6 +193,24 @@ pub fn set_nick(n: &str) {
             return;
         }
         x.nick = n;
+    }
+    save();
+}
+
+/// Últimas escolhas da interface (JSON livre; Null se nunca salvas).
+pub fn prefs() -> serde_json::Value {
+    init();
+    EXTRA.lock().unwrap().prefs.clone()
+}
+
+pub fn set_prefs(v: serde_json::Value) {
+    init();
+    {
+        let mut x = EXTRA.lock().unwrap();
+        if x.prefs == v {
+            return;
+        }
+        x.prefs = v;
     }
     save();
 }

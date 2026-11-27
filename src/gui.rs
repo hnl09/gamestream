@@ -403,6 +403,12 @@ struct App {
     update_blocked: bool,
     /// Última interação do usuário (atualização com o app aberto só depois de um tempo parado).
     last_input: std::time::Instant,
+    /// Salas recentes ao vivo agora (código -> ao vivo) e quando foi a última consulta.
+    live_rooms: Arc<std::sync::Mutex<HashMap<String, bool>>>,
+    live_checked: Option<std::time::Instant>,
+    /// Preferências já salvas (para gravar só quando algo muda) e quando mudou por último.
+    saved_prefs: String,
+    prefs_changed: Option<std::time::Instant>,
 }
 
 impl App {
@@ -459,8 +465,14 @@ impl App {
             update_started: false,
             update_blocked: false,
             last_input: std::time::Instant::now(),
+            live_rooms: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            live_checked: None,
+            saved_prefs: String::new(),
+            prefs_changed: None,
         };
         a.refresh();
+        a.load_prefs();
+        a.saved_prefs = a.prefs_json().to_string();
         crate::updater::check_in_background();
         a
     }
@@ -1039,6 +1051,23 @@ impl App {
                     self.recent_avatars =
                         (std::time::Instant::now(), recent.iter().filter_map(|r| Some((r.code.clone(), crate::settings::recent_avatar(&r.code)?))).collect());
                 }
+                // Quais estão ao vivo: consulta o servidor de encontro a cada 60 s (só com a janela em foco).
+                let focused = ui.ctx().input(|i| i.focused);
+                if focused && self.live_checked.map_or(true, |t| t.elapsed() > Duration::from_secs(60)) {
+                    self.live_checked = Some(std::time::Instant::now());
+                    if let Some(server) = crate::room::server() {
+                        let codes: Vec<String> = recent.iter().map(|r| r.code.clone()).collect();
+                        let live = self.live_rooms.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(m) = crate::room::status(&server, &codes) {
+                                *live.lock().unwrap() = m;
+                            }
+                        });
+                    }
+                }
+                let live = self.live_rooms.lock().unwrap().clone();
+                let mut recent = recent;
+                recent.sort_by_key(|r| !live.get(&r.code).copied().unwrap_or(false)); // ao vivo primeiro
                 let mut connect_to: Option<String> = None;
                 let (avatars, recent_av) = (&mut self.avatars, &self.recent_avatars.1);
                 card(ui, crate::i18n::t("Salas recentes"), |ui| {
@@ -1047,7 +1076,16 @@ impl App {
                             let tex = avatars.get(ui.ctx(), &format!("r:{}", r.code), recent_av.get(&r.code));
                             avatar_circle(ui, tex.as_ref(), &r.name, 32.0);
                             ui.vertical(|ui| {
-                                ui.label(RichText::new(if r.name.is_empty() { crate::room::display(&r.code) } else { r.name.clone() }).strong());
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(if r.name.is_empty() { crate::room::display(&r.code) } else { r.name.clone() }).strong());
+                                    match live.get(&r.code) {
+                                        Some(true) => pill(ui, crate::i18n::t("AO VIVO"), pal().live),
+                                        Some(false) => {
+                                            ui.label(RichText::new(crate::i18n::t("offline")).small().color(pal().muted));
+                                        }
+                                        None => {}
+                                    }
+                                });
                                 ui.label(RichText::new(format!("{}  ·  {}", crate::room::display(&r.code), ago(r.last))).small().color(pal().muted));
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1494,6 +1532,117 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
 }
 
 impl App {
+    /// Últimas escolhas da interface (sem a senha), salvas em settings.json.
+    fn prefs_json(&self) -> serde_json::Value {
+        let audio_sel = match &self.audio_sel {
+            AudioSel::GameWindow => serde_json::json!({ "kind": "game" }),
+            AudioSel::AllExceptDiscord => serde_json::json!({ "kind": "no-discord" }),
+            AudioSel::DefaultOutput => serde_json::json!({ "kind": "default" }),
+            AudioSel::App { name, .. } => serde_json::json!({ "kind": "app", "name": name }),
+            AudioSel::Output(n) => serde_json::json!({ "kind": "output", "name": n }),
+            AudioSel::Input(n) => serde_json::json!({ "kind": "input", "name": n }),
+        };
+        serde_json::json!({
+            "tab": if self.tab == Tab::View { "view" } else { "host" },
+            "source": if self.src_kind == SrcKind::Window { "window" } else { "monitor" },
+            "monitor": self.monitors.get(self.sel_monitor).map(|m| m.name.clone()),
+            "window": self.sel_window.as_ref().map(|(_, t)| t.clone()),
+            "preview": self.preview,
+            "audio": self.audio,
+            "audio_sel": audio_sel,
+            "audio_pcm": self.audio_pcm,
+            "mic": self.mic,
+            "auto_bitrate": self.auto_bitrate,
+            "bitrate": self.bitrate,
+            "fps": self.fps,
+            "upnp": self.upnp,
+            "encoder": self.encoder,
+            "approval": self.approval,
+            "friends": self.friends,
+            "view_out": self.view_out,
+            "volume": self.volume,
+            "muted": self.muted,
+            "want_pad": self.want_pad,
+            "want_kbm": self.want_kbm,
+        })
+    }
+
+    /// Restaura as últimas escolhas (o que não existir mais, como uma janela fechada, fica no padrão).
+    fn load_prefs(&mut self) {
+        let p = crate::settings::prefs();
+        if !p.is_object() {
+            return;
+        }
+        let b = |k: &str, d: bool| p[k].as_bool().unwrap_or(d);
+        let n = |k: &str, d: u32| p[k].as_u64().map(|v| v as u32).unwrap_or(d);
+        self.tab = if p["tab"] == "view" { Tab::View } else { Tab::Host };
+        if let Some(name) = p["monitor"].as_str() {
+            if let Some(i) = self.monitors.iter().position(|m| m.name == name) {
+                self.sel_monitor = i;
+            }
+        }
+        self.src_kind = SrcKind::Monitor;
+        if p["source"] == "window" {
+            if let Some(w) = p["window"].as_str().and_then(|t| self.windows.iter().find(|w| w.title == t)) {
+                self.sel_window = Some((w.hwnd, w.title.clone()));
+                self.src_kind = SrcKind::Window;
+            }
+        }
+        self.last_src_kind = self.src_kind;
+        self.preview = b("preview", self.preview);
+        self.audio = b("audio", self.audio);
+        let name = p["audio_sel"]["name"].as_str().unwrap_or("").to_string();
+        self.audio_sel = match p["audio_sel"]["kind"].as_str() {
+            Some("game") if self.src_kind == SrcKind::Window => AudioSel::GameWindow,
+            Some("default") => AudioSel::DefaultOutput,
+            Some("app") if !name.is_empty() => AudioSel::App {
+                pid: self.audio_apps.iter().find(|(_, n)| *n == name).map(|(p, _)| *p).unwrap_or(0),
+                name,
+            },
+            Some("output") if self.out_devices.contains(&name) => AudioSel::Output(name),
+            Some("input") if self.in_devices.contains(&name) => AudioSel::Input(name),
+            _ if self.src_kind == SrcKind::Window => AudioSel::GameWindow,
+            _ => AudioSel::AllExceptDiscord,
+        };
+        self.audio_pcm = b("audio_pcm", self.audio_pcm);
+        self.mic = p["mic"].as_str().filter(|m| self.in_devices.iter().any(|d| d == m)).map(String::from);
+        self.auto_bitrate = b("auto_bitrate", self.auto_bitrate);
+        self.bitrate = n("bitrate", self.bitrate).clamp(host::MIN_BITRATE, 200);
+        self.fps = match n("fps", self.fps) {
+            f @ (30 | 60 | 120) => f,
+            _ => self.fps,
+        };
+        self.upnp = b("upnp", self.upnp);
+        if let Some(e) = p["encoder"].as_str() {
+            self.encoder = e.to_string();
+        }
+        self.approval = b("approval", self.approval);
+        self.friends = n("friends", self.friends).clamp(1, 20);
+        self.view_out = p["view_out"].as_str().filter(|d| self.out_devices.iter().any(|o| o == d)).map(String::from);
+        self.volume = p["volume"].as_f64().map(|v| v as f32).unwrap_or(self.volume).clamp(0.0, 2.0);
+        self.muted = b("muted", self.muted);
+        self.want_pad = b("want_pad", self.want_pad);
+        self.want_kbm = b("want_kbm", self.want_kbm);
+    }
+
+    /// Grava as escolhas quando mudam (no máximo uma vez por segundo, para não gravar a cada quadro
+    /// enquanto um controle deslizante é arrastado).
+    fn save_prefs_if_changed(&mut self) {
+        let now = self.prefs_json().to_string();
+        if now == self.saved_prefs {
+            self.prefs_changed = None;
+            return;
+        }
+        let since = *self.prefs_changed.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= Duration::from_secs(1) {
+            if let Ok(v) = serde_json::from_str(&now) {
+                crate::settings::set_prefs(v);
+            }
+            self.saved_prefs = now;
+            self.prefs_changed = None;
+        }
+    }
+
     /// Atualização automática. Ao abrir: verifica (até ~6 s) e, havendo versão nova, instala e
     /// reinicia antes de mostrar o app. Com o app aberto: instala sozinho só se não houver transmissão
     /// nem conexão e o usuário estiver há 2 minutos sem mexer; senão fica o botão "Atualizar" no topo.
@@ -1635,6 +1784,7 @@ impl eframe::App for App {
         if self.auto_update(ctx) {
             return;
         }
+        self.save_prefs_if_changed();
 
         // Abre o popup (e copia o convite) assim que a transmissão fica pronta.
         let invite = state::HOST.lock().unwrap().invite.clone();
