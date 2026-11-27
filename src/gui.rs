@@ -1370,6 +1370,7 @@ impl App {
                 ("I", crate::i18n::t("fixa as estatísticas no canto da tela")),
                 ("Enter", crate::i18n::t("escrever no chat (aparece em cima do vídeo para todos)")),
                 ("1 – 6", crate::i18n::t("reações: 👍 😂 🔥 ❤ 😮 GG")),
+                (crate::i18n::t("Botão direito"), crate::i18n::t("aponta um lugar no vídeo para todos (some em 1 segundo)")),
                 ("F8", crate::i18n::t("liga/desliga o controle por teclado e mouse (quando o transmissor permitir)")),
             ] {
                 ui.horizontal_wrapped(|ui| {

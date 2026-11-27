@@ -111,14 +111,23 @@ pub fn request_stop() {
 /// Envia uma mensagem no chat como transmissor.
 pub fn send_chat(text: &str) {
     if let (Some(tx), Some(text)) = (CHAT.lock().unwrap().as_ref(), control::clean_text(text)) {
-        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text, react: false });
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text, react: false, ping: None });
     }
 }
 
 /// Envia uma reação como transmissor.
 pub fn send_react(r: &str) {
     if let (Some(tx), Some(r)) = (CHAT.lock().unwrap().as_ref(), control::clean_react(r)) {
-        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: r, react: true });
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: r, react: true, ping: None });
+    }
+}
+
+/// Aponta um lugar no vídeo (pré-visualização do transmissor).
+pub fn send_ping(x: f32, y: f32) {
+    if let Some(tx) = CHAT.lock().unwrap().as_ref() {
+        if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
+            let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: String::new(), react: false, ping: Some((x, y)) });
+        }
     }
 }
 
@@ -268,6 +277,7 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
                     e = ev_rx.recv() => match e {
                         Some(crate::viewer::OverlayEv::Chat(t)) => send_chat(&t),
                         Some(crate::viewer::OverlayEv::React(r)) => send_react(&r),
+                        Some(crate::viewer::OverlayEv::Ping(x, y)) => send_ping(x, y),
                         None => break,
                     },
                 }
@@ -955,6 +965,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         async move {
             loop {
                 match rx.recv().await {
+                    Ok(m) if m.ping.is_some() => {} // apontar não entra no histórico do chat
                     Ok(m) => state::host(|h| state::push_chat(&mut h.chat, m)),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
@@ -1403,6 +1414,8 @@ async fn handle_viewer(
             let mut open = true;
             // Limite de mensagens: 8 a cada 10 s.
             let mut recent: std::collections::VecDeque<Instant> = Default::default();
+            // Apontar: no máximo 4 a cada 3 s.
+            let mut pings: std::collections::VecDeque<Instant> = Default::default();
             loop {
                 tokio::select! {
                     l = lines.next_line(), if open => {
@@ -1418,13 +1431,22 @@ async fn handle_viewer(
                                     continue;
                                 }
                                 let msg = if t == "chat" {
-                                    control::clean_text(v["text"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: false })
+                                    control::clean_text(v["text"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: false, ping: None })
                                 } else {
-                                    control::clean_react(v["r"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: true })
+                                    control::clean_react(v["r"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: true, ping: None })
                                 };
                                 if let Some(m) = msg {
                                     recent.push_back(Instant::now());
                                     let _ = chat_tx.send(m);
+                                }
+                            }
+                            "ping" => {
+                                while pings.front().is_some_and(|t| t.elapsed() > Duration::from_secs(3)) {
+                                    pings.pop_front();
+                                }
+                                if let (true, Some(p)) = (pings.len() < 4, control::clean_point(&v)) {
+                                    pings.push_back(Instant::now());
+                                    let _ = chat_tx.send(ChatMsg { id: member_id.clone(), from: name.clone(), text: String::new(), react: false, ping: Some(p) });
                                 }
                             }
                             "control_req" => {

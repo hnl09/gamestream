@@ -74,6 +74,7 @@ ASSISTIR
          exibidas acima do painel. A tecla I (ou o botão "i") as fixa no
          canto da tela.
        - Enter: escrever no chat. Teclas 1 a 6: reações (👍 😂 🔥 ❤ 😮 GG).
+       - Botão direito: aponta um lugar do vídeo para todos (some em ~1 s).
          Mensagens e reações aparecem para todos, em cima do vídeo.
        - Canto superior esquerdo: avatares de quem está na sala (passe o
          mouse para ver o nome). Anel vermelho = transmissor; verde = jogando.

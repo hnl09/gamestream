@@ -1,6 +1,6 @@
 [package]
 name = "gamestream"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2021"
 description = "Transmissão de vídeo e áudio com baixa latência para Windows (HEVC acelerado por GPU + QUIC)"
 license = "MIT"

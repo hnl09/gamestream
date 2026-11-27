@@ -345,4 +345,6 @@ const PAIRS: &[(&str, &str)] = &[
     ("Todos voltam a passar pela sala de espera", "Everyone goes through the waiting room again"),
     ("Fica lembrado: nas próximas transmissões, esta pessoa entra direto", "Remembered: in future streams, this person joins directly"),
     ("Desconecta, bloqueia até o fim da transmissão e esquece a aprovação (volta a passar pela sala de espera)", "Disconnects, blocks until the stream ends and forgets the approval (back to the waiting room)"),
+    ("Botão direito", "Right click"),
+    ("aponta um lugar no vídeo para todos (some em 1 segundo)", "points at a spot on the video for everyone (disappears after 1 second)"),
 ];

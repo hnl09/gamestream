@@ -108,6 +108,8 @@ pub fn mpv_args(mode: &str, title: &str, ipc: Option<&str>) -> Vec<String> {
 pub enum OverlayEv {
     Chat(String),
     React(String),
+    /// Apontar na tela (posição no vídeo, 0..1).
+    Ping(f32, f32),
 }
 
 /// O que a interface (ou o terminal) manda para o transmissor.
@@ -147,6 +149,9 @@ pub fn request_control(pad: bool, kbm: bool) {
 
 /// Comando IPC que mostra uma mensagem/reação na janela do vídeo.
 pub fn osd_chat_cmd(m: &crate::control::ChatMsg) -> String {
+    if let Some((x, y)) = m.ping {
+        return serde_json::json!({ "command": ["script-message", "gs-ping", m.from, x.to_string(), y.to_string()] }).to_string();
+    }
     let kind = if m.react { "gs-react" } else { "gs-chat" };
     serde_json::json!({ "command": ["script-message", kind, m.from, m.text] }).to_string()
 }
@@ -223,6 +228,10 @@ fn overlay_event(v: &serde_json::Value) -> Option<OverlayEv> {
     match args.first()?.as_str()? {
         "gs-out-chat" => Some(OverlayEv::Chat(text)),
         "gs-out-react" => Some(OverlayEv::React(text)),
+        "gs-out-ping" => {
+            let (x, y) = (text.parse::<f32>().ok()?, args.get(2)?.as_str()?.parse::<f32>().ok()?);
+            ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some(OverlayEv::Ping(x, y))
+        }
         _ => None,
     }
 }
@@ -855,6 +864,11 @@ async fn run_session(
                                         crate::settings::add_recent(code, &name);
                                     }
                                 }
+                                "ping" => {
+                                    if let Some(m) = crate::control::ChatMsg::from_json(&v) {
+                                        let _ = p.osd_tx.send(osd_chat_cmd(&m));
+                                    }
+                                }
                                 "chat" | "react" => {
                                     if let Some(m) = crate::control::ChatMsg::from_json(&v) {
                                         if m.react {
@@ -969,6 +983,7 @@ async fn run_session(
                     match ev {
                         Some(OverlayEv::Chat(t)) => if let Some(t) = crate::control::clean_text(&t) { pending_out.push(serde_json::json!({ "t": "chat", "text": t })) },
                         Some(OverlayEv::React(r)) => if let Some(r) = crate::control::clean_react(&r) { pending_out.push(serde_json::json!({ "t": "react", "r": r })) },
+                        Some(OverlayEv::Ping(x, y)) => pending_out.push(serde_json::json!({ "t": "ping", "x": x, "y": y })),
                         None => {}
                     }
                     continue;

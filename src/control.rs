@@ -38,11 +38,15 @@ pub struct ChatMsg {
     pub text: String,
     /// true = reação (text é um item de REACTIONS).
     pub react: bool,
+    /// Apontar na tela: posição no vídeo (0..1 na largura e na altura). Não entra no chat.
+    pub ping: Option<(f32, f32)>,
 }
 
 impl ChatMsg {
     pub fn to_json(&self) -> Value {
-        if self.react {
+        if let Some((x, y)) = self.ping {
+            json!({ "t": "ping", "id": self.id, "from": self.from, "x": x, "y": y })
+        } else if self.react {
             json!({ "t": "react", "id": self.id, "from": self.from, "r": self.text })
         } else {
             json!({ "t": "chat", "id": self.id, "from": self.from, "text": self.text })
@@ -54,8 +58,9 @@ impl ChatMsg {
         let from = clean_name(v["from"].as_str()?);
         let id: String = v["id"].as_str().unwrap_or("").chars().take(16).collect();
         match v["t"].as_str()? {
-            "chat" => Some(ChatMsg { id, from, text: clean_text(v["text"].as_str()?)?, react: false }),
-            "react" => Some(ChatMsg { id, from, text: clean_react(v["r"].as_str()?)?, react: true }),
+            "chat" => Some(ChatMsg { id, from, text: clean_text(v["text"].as_str()?)?, react: false, ping: None }),
+            "react" => Some(ChatMsg { id, from, text: clean_react(v["r"].as_str()?)?, react: true, ping: None }),
+            "ping" => Some(ChatMsg { id, from, text: String::new(), react: false, ping: Some(clean_point(v)?) }),
             _ => None,
         }
     }
@@ -71,6 +76,12 @@ pub fn clean_text(s: &str) -> Option<String> {
     let t: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect();
     let t = t.trim().to_string();
     (!t.is_empty()).then_some(t)
+}
+
+/// Posição apontada (x, y entre 0 e 1). None se faltar ou estiver fora do vídeo.
+pub fn clean_point(v: &Value) -> Option<(f32, f32)> {
+    let (x, y) = (v["x"].as_f64()? as f32, v["y"].as_f64()? as f32);
+    ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some((x, y))
 }
 
 pub fn clean_react(s: &str) -> Option<String> {
@@ -173,6 +184,13 @@ mod tests {
         let p = Pad { buttons: 0x9013, lt: 200, rt: 7, lx: -32768, ly: 32767, rx: 123, ry: -456 };
         assert_eq!(Pad::decode(&p.encode()), Some(p));
         assert_eq!(decode_mouse(&encode_mouse(-5, 70000)), Some((-5, 32767)));
+    }
+
+    #[test]
+    fn ping_roundtrip() {
+        let m = ChatMsg { id: "v1".into(), from: "Ana".into(), text: String::new(), react: false, ping: Some((0.25, 0.75)) };
+        assert_eq!(ChatMsg::from_json(&m.to_json()), Some(m));
+        assert_eq!(ChatMsg::from_json(&json!({ "t": "ping", "from": "x", "x": 1.5, "y": 0.2 })), None);
     }
 
     #[test]

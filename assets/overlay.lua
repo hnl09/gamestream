@@ -5,6 +5,7 @@
 --   * Duplo clique / F: tela cheia.
 --   * I: fixa as estatísticas (ping, FPS, perda, Mbps) no canto da tela.
 --   * Enter: escrever no chat · 1 a 6: reações (aparecem para todos na hora).
+--   * Botão direito: aponta um lugar no vídeo para todos (some em ~1 s).
 --   * Painel no canto inferior direito (aparece ao mexer o mouse): som, volume, zoom, tela cheia.
 -- O volume é guardado em user-data/gs/* e o GameStream (que toca o áudio) acompanha pela IPC.
 
@@ -194,7 +195,7 @@ local function render(show)
         ass[#ass + 1] = text(x0 + total, above, L("Arraste para mover  ·  botão do meio restaura", "Drag to pan  ·  middle button resets"), 15, C_DIM, 6)
         above = above - 22
     end
-    ass[#ass + 1] = text(x0 + total, above, L("Enter: chat  ·  1 a 6: reações", "Enter: chat  ·  1 to 6: reactions"), 15, C_DIM, 6)
+    ass[#ass + 1] = text(x0 + total, above, L("Enter: chat  ·  1 a 6: reações  ·  botão direito: apontar", "Enter: chat  ·  1 to 6: reactions  ·  right click: point"), 15, C_DIM, 6)
     overlay.data = table.concat(ass, "\n")
     overlay:update()
 end
@@ -347,6 +348,16 @@ mp.register_script_message("gs-react", function(from, r)
     end
 end)
 mp.register_script_message("gs-status", function(s) status_text = s or "" end)
+
+-- Apontar na tela: marcador rápido (some em ~1 s) na posição do vídeo, com o nome de quem apontou.
+local pings = {} -- { from, x, y, t }
+local PING_SECS = 1.1
+mp.register_script_message("gs-ping", function(from, x, y)
+    x, y = tonumber(x), tonumber(y)
+    if not x or not y then return end
+    if #pings >= 12 then table.remove(pings, 1) end
+    pings[#pings + 1] = { from = from or "", x = x, y = y, t = mp.get_time() }
+end)
 -- Avatares de quem está na sala (vêm do GameStream como JSON). Fotos: imagens BGRA desenhadas com
 -- overlay-add; quem não tem foto ganha um círculo colorido com a inicial.
 local utils = require("mp.utils")
@@ -482,6 +493,25 @@ local function render_social()
     end
     reacts = keep
 
+    -- Marcadores de "apontar": anel que abre e some rápido.
+    local keep_p = {}
+    local vw, vh = d.w - d.ml - d.mr, d.h - d.mt - d.mb
+    for _, pg in ipairs(pings) do
+        local age = now - pg.t
+        if age < PING_SECS then
+            keep_p[#keep_p + 1] = pg
+            local px, py = d.ml + pg.x * vw, d.mt + pg.y * vh
+            local k = age / PING_SECS
+            local a = math.floor(k * k * 255)
+            local c = name_color(pg.from)
+            ass[#ass + 1] = ring(px, py, 8 + k * 26, c):gsub("\\1a&HFF&", "\\1a&HFF&\\3a&H" .. string.format("%02X", a) .. "&", 1)
+            ass[#ass + 1] = circle(px, py, 5, c, a)
+            ass[#ass + 1] = string.format("{\\an2\\pos(%d,%d)\\fs15\\fnSegoe UI\\b1\\bord2\\shad0\\3c&H000000&\\1c%s\\alpha&H%02X&}%s",
+                px, py - 14, C_TXT, a, esc(pg.from))
+        end
+    end
+    pings = keep_p
+
     social.data = table.concat(ass, "\n")
     social:update()
 end
@@ -503,6 +533,17 @@ local function open_chat()
     })
 end
 mp.add_forced_key_binding("ENTER", "gs_chat", open_chat)
+
+-- Botão direito: aponta (fora do painel; o ponto é enviado em relação ao vídeo).
+mp.add_forced_key_binding("MBTN_RIGHT", "gs_ping", function()
+    local d = dims()
+    if not d or panel_hit(mouse.x, mouse.y) then return end
+    local vw, vh = d.w - d.ml - d.mr, d.h - d.mt - d.mb
+    if vw <= 0 or vh <= 0 then return end
+    local u, v = (mouse.x - d.ml) / vw, (mouse.y - d.mt) / vh
+    if u < 0 or u > 1 or v < 0 or v > 1 then return end
+    mp.commandv("script-message", "gs-out-ping", string.format("%.4f", u), string.format("%.4f", v))
+end)
 mp.add_forced_key_binding("KP_ENTER", "gs_chat_kp", open_chat)
 for i, r in ipairs(REACTIONS) do
     mp.add_forced_key_binding(tostring(i), "gs_react_" .. i, function()
