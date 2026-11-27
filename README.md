@@ -30,6 +30,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Código de sala curto** (ex.: `KX7-92B`) e **conexão automática**: o espectador digita o código e o aplicativo libera a conexão pelo firewall do transmissor sozinho, sem configurar o roteador. Também funciona por IPv6, UPnP, código de resposta ou VPN.
 - **Sala de espera**: aprove cada espectador antes de exibir a transmissão e remova quem quiser durante a sessão.
 - **Teste de conexão** opcional, que mede o upload e sugere o bitrate.
+- **Troca de monitor ou janela durante a transmissão**, sem desconectar os espectadores, e recuperação automática quando um jogo muda o modo de tela.
 - **Segurança**: criptografia TLS 1.3, verificação da identidade do transmissor pelo convite (proteção contra interceptação), senha e código de segurança.
 - **Controles na janela de vídeo**: volume, zoom a partir do cursor, tela cheia e estatísticas em tempo real (ping, FPS, perda de pacotes e taxa recebida).
 - **Pré-visualização local** da transmissão, sem áudio.

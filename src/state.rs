@@ -58,6 +58,8 @@ pub struct ViewStats {
     pub mbps: f64,
     /// Bitrate alvo do host.
     pub target: u32,
+    /// Nível do áudio recebido (dBFS) no último segundo; None = nenhum pacote de áudio chegou.
+    pub audio_db: Option<f32>,
 }
 
 impl ViewStats {

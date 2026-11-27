@@ -636,6 +636,39 @@ impl App {
                     pill(ui, crate::i18n::t("AO VIVO"), pal().live);
                     ui.label(RichText::new(&self.live_desc).strong());
                 });
+                // Trocar monitor/janela sem encerrar a transmissão.
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::i18n::t("Trocar fonte:")).small().color(pal().muted));
+                    let mut chosen: Option<(Source, String)> = None;
+                    egui::ComboBox::from_id_salt("live_source")
+                        .width(ui.available_width() - 40.0)
+                        .selected_text(&self.live_desc)
+                        .show_ui(ui, |ui| {
+                            for m in &self.monitors {
+                                if ui.selectable_label(false, format!("🖥  {}", m.label())).clicked() {
+                                    chosen = Some((Source::Monitor(m.idx), m.label()));
+                                }
+                            }
+                            ui.separator();
+                            for w in &self.windows {
+                                if ui.selectable_label(false, format!("🎮  {}", w.title)).clicked() {
+                                    chosen = Some((
+                                        Source::Window { hwnd: w.hwnd, title: w.title.clone() },
+                                        crate::tr!("Janela: {}", "Window: {}", w.title),
+                                    ));
+                                }
+                            }
+                        });
+                    if ui.button("⟳").on_hover_text(crate::i18n::t("Atualizar listas de monitores, janelas e áudio")).clicked() {
+                        self.refresh();
+                    }
+                    if let Some((src, desc)) = chosen {
+                        match host::switch_source(src) {
+                            Ok(()) => self.live_desc = desc,
+                            Err(e) => state::log(format!("{e:#}")),
+                        }
+                    }
+                });
                 ui.add_space(6.0);
                 ui.columns(4, |c| {
                     stat(&mut c[0], crate::i18n::t("Espectadores"), st.viewers.len().to_string());
@@ -864,6 +897,28 @@ impl App {
                 });
                 stat(&mut c[3], crate::i18n::t("Taxa recebida"), format!("{:.1} Mbps", s.mbps));
             });
+            // Indicador de áudio recebido: mostra se o som está chegando (e se está em silêncio).
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(crate::i18n::t("Áudio recebido:")).small().color(pal().muted));
+                match s.audio_db {
+                    None => {
+                        ui.label(RichText::new(crate::i18n::t("nenhum (o transmissor não está enviando áudio)")).small().color(Color32::from_rgb(255, 190, 90)));
+                    }
+                    Some(db) => {
+                        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                        ui.add(egui::ProgressBar::new(level).desired_width(140.0).desired_height(8.0).fill(pal().ok));
+                        let txt = if db <= -60.0 {
+                            crate::i18n::t("silêncio").to_string()
+                        } else {
+                            format!("{db:.0} dB")
+                        };
+                        ui.label(RichText::new(txt).small().color(pal().muted));
+                    }
+                }
+            });
+            if s.audio_db.is_some_and(|db| db > -60.0) {
+                hint(ui, crate::i18n::t("Se não estiver ouvindo, confira a saída de áudio (padrão do Windows) e o volume no painel do vídeo."));
+            }
             if s.loss >= 2.0 {
                 hint(ui, crate::i18n::t("Perda de pacotes elevada: a conexão (ou o Wi-Fi) está instável. Com bitrate automático, o transmissor reduzirá a taxa."));
             }

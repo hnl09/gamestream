@@ -35,6 +35,11 @@ macro_rules! tr {
 }
 
 const PAIRS: &[(&str, &str)] = &[
+    ("Áudio recebido:", "Audio received:"),
+    ("nenhum (o transmissor não está enviando áudio)", "none (the streamer is not sending audio)"),
+    ("silêncio", "silence"),
+    ("Se não estiver ouvindo, confira a saída de áudio (padrão do Windows) e o volume no painel do vídeo.", "If you can't hear it, check the audio output (Windows default) and the volume in the video panel."),
+    ("Trocar fonte:", "Change source:"),
     ("[sala] conectada ao servidor de encontro: espectadores conectam automaticamente.", "[room] connected to the rendezvous server: viewers connect automatically."),
     ("sala não encontrada ou transmissão encerrada", "room not found or stream ended"),
     ("sem conexão com o servidor de encontro", "no connection to the rendezvous server"),

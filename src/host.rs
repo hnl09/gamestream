@@ -319,6 +319,38 @@ pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::Capt
     }
 }
 
+/// Captura para uma fonte: janela com captura nativa (gfxcapture) quando disponível; senão, recorte.
+fn capture_for(src: &Source, gfx: bool) -> Result<Capture> {
+    match src {
+        Source::Window { hwnd, .. } if gfx => {
+            sources::resolve(src)?; // confere se a janela existe e não está minimizada
+            Ok(Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd) })
+        }
+        _ => sources::resolve(src),
+    }
+}
+
+fn source_desc(src: &Source) -> String {
+    match src {
+        Source::Monitor(i) => crate::tr!("monitor {}", "monitor {}", i + 1),
+        Source::Window { title, .. } => crate::tr!("janela \"{title}\"", "window \"{title}\""),
+    }
+}
+
+/// Troca a fonte (monitor ou janela) da transmissão em andamento, sem desconectar ninguém.
+static SWITCH: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Source>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+pub fn switch_source(src: Source) -> Result<()> {
+    SWITCH
+        .lock()
+        .unwrap()
+        .as_ref()
+        .context(crate::i18n::t("nenhuma transmissão ativa"))?
+        .send(src)
+        .map_err(|_| anyhow::anyhow!("{}", crate::i18n::t("nenhuma transmissão ativa")))
+}
+
 /// O FFmpeg tem o filtro `gfxcapture` (Windows Graphics Capture)? Existe a partir do FFmpeg 8.
 async fn has_gfxcapture(ffmpeg: &str) -> bool {
     let out = Command::new(ffmpeg)
@@ -345,21 +377,28 @@ fn find_vps(b: &[u8]) -> Option<usize> {
 
 /// Acompanha a janela transmitida: se ela mudar de lugar, tamanho ou monitor, publica o novo recorte
 /// (só depois que parar de mexer, para não reiniciar o encoder a cada pixel do arraste).
-async fn track_window(source: Source, mut current: Capture, cap_tx: watch::Sender<Capture>) {
-    let Source::Window { title, .. } = &source else {
-        return std::future::pending().await;
-    };
+async fn track_window(source: &Mutex<Source>, cap_tx: &watch::Sender<Capture>) {
     let mut pending: Option<Capture> = None;
     let mut warned = false;
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        match sources::resolve(&source) {
+        let src = source.lock().unwrap().clone();
+        let Source::Window { title, .. } = &src else {
+            pending = None;
+            continue;
+        };
+        let current = cap_tx.borrow().clone();
+        if current.hwnd.is_some() {
+            // A captura nativa já acompanha a janela sozinha.
+            pending = None;
+            continue;
+        }
+        match sources::resolve(&src) {
             Ok(c) if c != current => {
                 warned = false;
                 if pending.as_ref() == Some(&c) {
                     // Parou de mexer: aplica.
                     log(crate::tr!("[janela] \"{title}\" foi movida ou redimensionada; captura ajustada.", "[window] \"{title}\" was moved or resized; capture adjusted."));
-                    current = c.clone();
                     let _ = cap_tx.send(c);
                     pending = None;
                 } else {
@@ -389,9 +428,12 @@ async fn encoder_loop(
     vtx: broadcast::Sender<VideoChunk>,
     bytes_out: Arc<AtomicU64>,
 ) -> Result<()> {
+    // Reinícios seguidos por falha de captura (o contador zera quando o encoder fica estável).
+    let mut failures: u32 = 0;
     loop {
         let br = *br_rx.borrow_and_update();
         let cap = cap_rx.borrow_and_update().clone();
+        let started = Instant::now();
         let mut child = Command::new(&o.ffmpeg)
             .args(ffmpeg_args(o, &cap, enc, cpu_copy, br, false))
             .stdin(Stdio::null())
@@ -409,12 +451,13 @@ async fn encoder_loop(
                 log(format!("[ffmpeg] {l}"));
             }
         });
+        // Termina (Ok) quando o FFmpeg para de enviar vídeo.
         let read = async {
             let mut buf = vec![0u8; 1 << 20];
             loop {
                 let n = stdout.read(&mut buf).await?;
                 if n == 0 {
-                    bail!(crate::i18n::t("o encoder (FFmpeg) foi encerrado. Se a fonte for uma janela, verifique se ela foi fechada ou minimizada."));
+                    return anyhow::Ok(());
                 }
                 bytes_out.fetch_add(n as u64, Ordering::Relaxed);
                 let raw = Bytes::copy_from_slice(&buf[..n]);
@@ -422,7 +465,26 @@ async fn encoder_loop(
             }
         };
         tokio::select! {
-            r = read => return r,
+            r = read => {
+                r?;
+                let _ = child.kill().await;
+                // O Windows interrompe a captura quando um jogo entra/sai de tela cheia exclusiva ou muda a
+                // resolução (DXGI_ERROR_ACCESS_LOST). Reinicia o encoder sem derrubar os espectadores; eles
+                // retomam no próximo keyframe.
+                if started.elapsed() > Duration::from_secs(30) {
+                    failures = 0;
+                }
+                failures += 1;
+                if failures > 8 {
+                    bail!(crate::i18n::t("o encoder (FFmpeg) foi encerrado. Se a fonte for uma janela, verifique se ela foi fechada ou minimizada."));
+                }
+                log(crate::tr!(
+                    "[encoder] captura interrompida (o jogo pode ter mudado de modo de tela); reiniciando ({}/8)...",
+                    "[encoder] capture interrupted (the game may have changed display mode); restarting ({}/8)...",
+                    failures
+                ));
+                tokio::time::sleep(Duration::from_millis(500 * failures as u64)).await;
+            }
             _ = br_rx.changed() => {
                 let _ = child.kill().await;
             }
@@ -501,11 +563,11 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         // Usa o ffmpeg.exe da pasta do GameStream ou do PATH; se não houver, faz o download (uma única vez).
         o.ffmpeg = tokio::task::spawn_blocking(crate::updater::ensure_ffmpeg).await??;
     }
-    let mut cap = sources::resolve(&o.source)?;
-    if let Source::Window { hwnd, .. } = &o.source {
-        if has_gfxcapture(&o.ffmpeg).await {
+    let gfx = has_gfxcapture(&o.ffmpeg).await;
+    let cap = capture_for(&o.source, gfx)?;
+    if let Source::Window { .. } = &o.source {
+        if gfx {
             log(crate::i18n::t("Captura nativa de janela ativa (Windows Graphics Capture)."));
-            cap = Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd) };
         } else {
             log(crate::i18n::t("Esta versão do FFmpeg não oferece captura nativa de janela; usando recorte da tela. Atualize o ffmpeg.exe."));
         }
@@ -642,12 +704,22 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let (br_tx, br_rx) = watch::channel(start_br);
 
     let (cap_tx, cap_rx) = watch::channel(cap.clone());
-    let tracker = async {
-        if cap.hwnd.is_some() {
-            // A captura nativa já acompanha a janela sozinha.
-            std::future::pending::<()>().await
-        } else {
-            track_window(o.source.clone(), cap.clone(), cap_tx).await
+    let current_source = Mutex::new(o.source.clone());
+    let tracker = track_window(&current_source, &cap_tx);
+    // Troca de monitor/janela durante a transmissão: o encoder reinicia com a nova fonte e os
+    // espectadores continuam conectados (retomam no próximo keyframe).
+    let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<Source>();
+    *SWITCH.lock().unwrap() = Some(switch_tx);
+    let switcher = async {
+        while let Some(src) = switch_rx.recv().await {
+            match capture_for(&src, gfx) {
+                Ok(c) => {
+                    log(crate::tr!("Fonte alterada para {}.", "Source changed to {}.", source_desc(&src)));
+                    *current_source.lock().unwrap() = src;
+                    let _ = cap_tx.send(c);
+                }
+                Err(e) => log(crate::tr!("Não foi possível trocar a fonte: {e:#}", "Could not change the source: {e:#}")),
+            }
         }
     };
     let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone());
@@ -720,6 +792,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let res = tokio::select! {
         r = encoder => r,
         _ = puncher => Ok(()),
+        _ = switcher => Ok(()),
         _ = preview => Ok(()),
         _ = tracker => Ok(()),
         _ = accept => Ok(()),
@@ -729,6 +802,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = stop => Ok(()),
     };
     *PUNCH.lock().unwrap() = None;
+    *SWITCH.lock().unwrap() = None;
     DECISIONS.lock().unwrap().clear();
     CONNS.lock().unwrap().clear();
     BANNED.lock().unwrap().clear();

@@ -272,6 +272,16 @@ fn cli() -> Result<()> {
                         if let Err(e) = host::release_viewer(code) {
                             state::log(crate::tr!("Código de resposta: {e:#}", "Reply code: {e:#}"));
                         }
+                    } else if let Some(n) = code.strip_prefix("monitor ").and_then(|n| n.trim().parse::<u32>().ok()) {
+                        // Troca de fonte durante a transmissão: "monitor 2" ou "window <parte do título>".
+                        let _ = host::switch_source(sources::Source::Monitor(n.saturating_sub(1)));
+                    } else if let Some(t) = code.strip_prefix("window ") {
+                        match sources::find_window(t.trim()) {
+                            Some(w) => {
+                                let _ = host::switch_source(sources::Source::Window { hwnd: w.hwnd, title: w.title });
+                            }
+                            None => state::log(crate::tr!("nenhuma janela com \"{t}\" no título", "no window with \"{t}\" in its title")),
+                        }
                     }
                     line.clear();
                 }

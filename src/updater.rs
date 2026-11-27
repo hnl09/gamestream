@@ -101,20 +101,27 @@ pub fn check() -> Result<Option<Release>> {
 }
 
 /// Verifica atualização em segundo plano (chamado ao abrir o app).
+/// Verifica ao abrir o app e depois a cada hora (para quem deixa o app aberto).
 pub fn check_in_background() {
-    std::thread::spawn(|| {
-        set_state(UpdateState::Checking);
-        match check() {
-            Ok(Some(r)) => {
-                log(crate::tr!("Atualização disponível: {} (versão instalada: v{VERSION}).", "Update available: {} (installed: v{VERSION}).", r.tag));
-                set_state(UpdateState::Available(r));
+    std::thread::spawn(|| loop {
+        let busy = matches!(*UPDATE.lock().unwrap(), UpdateState::Available(_) | UpdateState::Downloading(..));
+        if !busy {
+            if !matches!(*UPDATE.lock().unwrap(), UpdateState::UpToDate) {
+                set_state(UpdateState::Checking);
             }
-            Ok(None) => set_state(UpdateState::UpToDate),
-            Err(e) => {
-                log(crate::tr!("[atualização] {e:#}", "[update] {e:#}"));
-                set_state(UpdateState::Error(format!("{e:#}")));
+            match check() {
+                Ok(Some(r)) => {
+                    log(crate::tr!("Atualização disponível: {} (versão instalada: v{VERSION}).", "Update available: {} (installed: v{VERSION}).", r.tag));
+                    set_state(UpdateState::Available(r));
+                }
+                Ok(None) => set_state(UpdateState::UpToDate),
+                Err(e) => {
+                    log(crate::tr!("[atualização] {e:#}", "[update] {e:#}"));
+                    set_state(UpdateState::Error(format!("{e:#}")));
+                }
             }
         }
+        std::thread::sleep(Duration::from_secs(3600));
     });
 }
 

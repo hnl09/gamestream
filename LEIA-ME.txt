@@ -44,6 +44,9 @@ TRANSMITIR
      "Sala de espera" e só recebe a transmissão depois de aprovado. Durante a
      transmissão, "Remover" desconecta e bloqueia um espectador.
   Opcional: "Testar conexão" (em Qualidade) mede o upload e sugere o bitrate.
+  Durante a transmissão, "Trocar fonte" muda o monitor ou a janela sem
+  desconectar os espectadores. Se um jogo mudar o modo de tela (tela cheia
+  exclusiva, resolução), a captura é reiniciada automaticamente.
 
 ------------------------------------------------------------
 ASSISTIR
@@ -63,6 +66,9 @@ ASSISTIR
        - Estatísticas (ping, FPS, perda de pacotes e taxa recebida) são
          exibidas acima do painel. A tecla I (ou o botão "i") as fixa no
          canto da tela.
+     "Áudio recebido" (na aba Assistir) mostra se o som está chegando. Se
+     houver nível mas nada for ouvido, confira a "Saída de áudio" escolhida
+     antes de conectar e o volume no painel do vídeo.
      Observação: na captura de janela, o FPS diminui quando o conteúdo da
      janela não muda, pois o Windows só envia novos quadros quando há
      alteração. Em jogos, a taxa permanece normal.

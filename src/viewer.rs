@@ -267,6 +267,9 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     tokio::pin!(control);
     let frames = Arc::new(AtomicU64::new(0));
     let bytes = Arc::new(AtomicU64::new(0));
+    // Soma dos quadrados (f32 em bits u64 via acumulação inteira) e nº de amostras de áudio recebidas.
+    let audio_sq = Arc::new(AtomicU64::new(0));
+    let audio_n = Arc::new(AtomicU64::new(0));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (mut last_frames, mut last_bytes, mut last_t) = (0u64, 0u64, std::time::Instant::now());
@@ -295,7 +298,13 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                     let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
                     let dt = last_t.elapsed().as_secs_f64().max(0.2);
                     let ping = conn.stats().path.rtt.as_millis() as u32;
+                    let (sq, n) = (audio_sq.swap(0, Ordering::Relaxed), audio_n.swap(0, Ordering::Relaxed));
+                    let audio_db = (n > 0).then(|| {
+                        let rms = (((sq as f64) * 256.0) / n as f64).sqrt() / 32768.0;
+                        if rms > 0.0 { (20.0 * rms.log10()).max(-90.0) as f32 } else { -90.0 }
+                    });
                     state::view(|v| {
+                        v.stats.audio_db = audio_db;
                         v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;
                         v.stats.mbps = (b - last_bytes) as f64 * 8.0 / 1e6 / dt;
                         v.stats.ping_ms = ping;
@@ -351,9 +360,17 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                         let ch = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
                         match audio::start_player(rate, ch, audio_device.clone()) {
                             Ok(mut player) => {
+                                let (asq, an) = (audio_sq.clone(), audio_n.clone());
                                 tasks.spawn(async move {
                                     let mut buf = Vec::new();
                                     while net::read_msg(&mut st, &mut buf).await? {
+                                        let mut sq = 0u64;
+                                        for c in buf.chunks_exact(2) {
+                                            let v = i16::from_le_bytes([c[0], c[1]]) as i64;
+                                            sq += (v * v) as u64;
+                                        }
+                                        asq.fetch_add(sq >> 8, Ordering::Relaxed);
+                                        an.fetch_add((buf.len() / 2) as u64, Ordering::Relaxed);
                                         player.push(&buf);
                                     }
                                     anyhow::Ok(())
@@ -370,12 +387,17 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                         let channels = if ch == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
                         match (opus::Decoder::new(rate, channels), audio::start_player(rate, ch, audio_device.clone())) {
                             (Ok(mut dec), Ok(mut player)) => {
+                                let (asq, an) = (audio_sq.clone(), audio_n.clone());
                                 tasks.spawn(async move {
                                     let mut buf = Vec::new();
                                     let mut pcm = vec![0f32; 5760 * ch.max(1) as usize];
                                     while net::read_msg(&mut st, &mut buf).await? {
                                         if let Ok(n) = dec.decode_float(&buf, &mut pcm, false) {
-                                            player.push_f32(&pcm[..n * ch.max(1) as usize]);
+                                            let s = &pcm[..n * ch.max(1) as usize];
+                                            let sq: f64 = s.iter().map(|x| (*x as f64 * 32767.0).powi(2)).sum();
+                                            asq.fetch_add((sq as u64) >> 8, Ordering::Relaxed);
+                                            an.fetch_add(s.len() as u64, Ordering::Relaxed);
+                                            player.push_f32(s);
                                         }
                                     }
                                     anyhow::Ok(())
