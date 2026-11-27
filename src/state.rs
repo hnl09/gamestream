@@ -56,8 +56,7 @@ pub struct ViewStats {
 
 impl ViewStats {
     pub fn line(&self) -> String {
-        format!(
-            "Ping {} ms  ·  {} FPS  ·  Perda {:.1}%  ·  {:.1} Mbps",
+        crate::tr!("Ping {} ms  ·  {} FPS  ·  Perda {:.1}%  ·  {:.1} Mbps", "Ping {} ms  ·  {} FPS  ·  Loss {:.1}%  ·  {:.1} Mbps",
             self.ping_ms, self.fps, self.loss, self.mbps
         )
     }

@@ -43,9 +43,9 @@ pub fn release_viewer(code: &str) -> Result<usize> {
         .lock()
         .unwrap()
         .as_ref()
-        .context("nenhuma transmissão ativa")?
+        .context(crate::i18n::t("nenhuma transmissão ativa"))?
         .send(addrs)
-        .map_err(|_| anyhow::anyhow!("nenhuma transmissão ativa"))?;
+        .map_err(|_| anyhow::anyhow!(crate::i18n::t("nenhuma transmissão ativa")))?;
     Ok(n)
 }
 
@@ -67,7 +67,7 @@ async fn preview_loop(vtx: broadcast::Sender<VideoChunk>) {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if let Err(e) = run_preview(&vtx).await {
-            log(format!("[pré-visualização] {e:#}"));
+            log(crate::tr!("[pré-visualização] {e:#}", "[preview] {e:#}"));
             set_preview(false);
         }
         state::host(|h| h.preview_open = false);
@@ -78,16 +78,16 @@ async fn preview_loop(vtx: broadcast::Sender<VideoChunk>) {
 async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
     let mpv = crate::viewer::find_mpv(None);
     let mut child = Command::new(&mpv)
-        .args(crate::viewer::mpv_args("preview", "GameStream - Pré-visualização (sem áudio)", None))
+        .args(crate::viewer::mpv_args("preview", crate::i18n::t("GameStream - Pré-visualização (sem áudio)"), None))
         .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("não foi possível abrir o player ({})", mpv.display()))?;
+        .with_context(|| crate::tr!("não foi possível abrir o player ({})", "could not open the player ({})", mpv.display()))?;
     let mut stdin = child.stdin.take().unwrap();
     let mut rx = vtx.subscribe();
     let mut waiting_keyframe = true;
     state::host(|h| h.preview_open = true);
-    log("[pré-visualização] aberta (sem áudio).");
+    log(crate::i18n::t("[pré-visualização] aberta (sem áudio)."));
     loop {
         tokio::select! {
             m = rx.recv() => match m {
@@ -114,7 +114,7 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
             _ = async { while preview_wanted() { tokio::time::sleep(Duration::from_millis(200)).await; } } => break,
         }
     }
-    log("[pré-visualização] fechada.");
+    log(crate::i18n::t("[pré-visualização] fechada."));
     Ok(())
 }
 
@@ -157,7 +157,7 @@ impl Enc {
             Enc::Amf => "AMD (hevc_amf)",
             Enc::Nvenc => "NVIDIA (hevc_nvenc)",
             Enc::Qsv => "Intel (hevc_qsv)",
-            Enc::X265 => "CPU (libx265, desempenho reduzido)",
+            Enc::X265 => crate::i18n::t("CPU (libx265, desempenho reduzido)"),
         }
     }
 }
@@ -255,7 +255,7 @@ async fn detect_encoder(o: &HostOpts, cap: &Capture) -> Result<(Enc, bool)> {
             }
         }
     }
-    bail!("nenhum encoder HEVC disponível. Verifique se o ffmpeg.exe está na pasta do GameStream.")
+    bail!(crate::i18n::t("nenhum encoder HEVC disponível. Verifique se o ffmpeg.exe está na pasta do GameStream."))
 }
 
 /// Transforma a escolha de áudio da interface numa fonte concreta (e uma descrição para o log).
@@ -266,14 +266,14 @@ fn resolve_audio(o: &HostOpts) -> (audio::CaptureSource, String) {
 pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::CaptureSource, String) {
     use audio::{AudioSel, CaptureSource};
     let except_discord = || match crate::procaudio::discord_root_pid() {
-        Some(pid) => (CaptureSource::ProcessExcept(pid), "todo o áudio do sistema, exceto o Discord".to_string()),
+        Some(pid) => (CaptureSource::ProcessExcept(pid), crate::i18n::t("todo o áudio do sistema, exceto o Discord").to_string()),
         // Sem Discord aberto: tudo menos o próprio GameStream (não reenvia o que você está assistindo).
-        None => (CaptureSource::ProcessExcept(std::process::id()), "todo o áudio do sistema (Discord não está em execução)".to_string()),
+        None => (CaptureSource::ProcessExcept(std::process::id()), crate::i18n::t("todo o áudio do sistema (Discord não está em execução)").to_string()),
     };
     match sel {
         AudioSel::GameWindow => match source {
             Source::Window { hwnd, title } => match sources::window_pid(*hwnd) {
-                Some(pid) => (CaptureSource::ProcessOnly(pid), format!("somente o áudio de \"{title}\"")),
+                Some(pid) => (CaptureSource::ProcessOnly(pid), crate::tr!("somente o áudio de \"{title}\"", "only the audio of \"{title}\"")),
                 None => except_discord(),
             },
             Source::Monitor(_) => except_discord(),
@@ -281,11 +281,11 @@ pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::Capt
         AudioSel::AllExceptDiscord => except_discord(),
         AudioSel::App { pid, name } => {
             let pid = crate::procaudio::pid_by_exe(name).unwrap_or(*pid);
-            (CaptureSource::ProcessOnly(pid), format!("somente o áudio de {name}"))
+            (CaptureSource::ProcessOnly(pid), crate::tr!("somente o áudio de {name}", "only the audio of {name}"))
         }
-        AudioSel::DefaultOutput => (CaptureSource::Output(None), "todo o áudio do sistema (inclui o Discord)".into()),
-        AudioSel::Output(n) => (CaptureSource::Output(Some(n.clone())), format!("dispositivo de saída {n}")),
-        AudioSel::Input(n) => (CaptureSource::Input(n.clone()), format!("dispositivo de entrada {n}")),
+        AudioSel::DefaultOutput => (CaptureSource::Output(None), crate::i18n::t("todo o áudio do sistema (inclui o Discord)").into()),
+        AudioSel::Output(n) => (CaptureSource::Output(Some(n.clone())), crate::tr!("dispositivo de saída {n}", "output device {n}")),
+        AudioSel::Input(n) => (CaptureSource::Input(n.clone()), crate::tr!("dispositivo de entrada {n}", "input device {n}")),
     }
 }
 
@@ -328,7 +328,7 @@ async fn track_window(source: Source, mut current: Capture, cap_tx: watch::Sende
                 warned = false;
                 if pending.as_ref() == Some(&c) {
                     // Parou de mexer: aplica.
-                    log(format!("[janela] \"{title}\" foi movida ou redimensionada; captura ajustada."));
+                    log(crate::tr!("[janela] \"{title}\" foi movida ou redimensionada; captura ajustada.", "[window] \"{title}\" was moved or resized; capture adjusted."));
                     current = c.clone();
                     let _ = cap_tx.send(c);
                     pending = None;
@@ -340,7 +340,7 @@ async fn track_window(source: Source, mut current: Capture, cap_tx: watch::Sende
             Err(e) => {
                 // Minimizada/fechada: mantém o último recorte e avisa uma vez.
                 if !warned {
-                    log(format!("[janela] {e:#}"));
+                    log(crate::tr!("[janela] {e:#}", "[window] {e:#}"));
                     warned = true;
                 }
             }
@@ -370,7 +370,7 @@ async fn encoder_loop(
             .creation_flags(CREATE_NO_WINDOW)
             .kill_on_drop(true)
             .spawn()
-            .context("não foi possível iniciar o ffmpeg.exe")?;
+            .context(crate::i18n::t("não foi possível iniciar o ffmpeg.exe"))?;
         let mut stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         tokio::spawn(async move {
@@ -384,7 +384,7 @@ async fn encoder_loop(
             loop {
                 let n = stdout.read(&mut buf).await?;
                 if n == 0 {
-                    bail!("o encoder (FFmpeg) foi encerrado. Se a fonte for uma janela, verifique se ela foi fechada ou minimizada.");
+                    bail!(crate::i18n::t("o encoder (FFmpeg) foi encerrado. Se a fonte for uma janela, verifique se ela foi fechada ou minimizada."));
                 }
                 bytes_out.fetch_add(n as u64, Ordering::Relaxed);
                 let raw = Bytes::copy_from_slice(&buf[..n]);
@@ -424,9 +424,9 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
                 let (pl, ps, plg) = prev.get(addr).copied().unwrap_or(now);
                 let (dl, ds) = (now.0 - pl, now.1 - ps);
                 if now.2 > plg {
-                    bad = Some(format!("{addr} com atraso no recebimento"));
+                    bad = Some(crate::tr!("{addr} com atraso no recebimento", "{addr} is lagging behind"));
                 } else if ds > 200 && dl * 100 > ds * 2 {
-                    bad = Some(format!("{addr} com {:.1}% de perda de pacotes", dl as f64 * 100.0 / ds as f64));
+                    bad = Some(crate::tr!("{addr} com {:.1}% de perda de pacotes", "{addr} has {:.1}% packet loss", dl as f64 * 100.0 / ds as f64));
                 }
                 prev.insert(*addr, now);
             }
@@ -435,7 +435,7 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
             clean_since = Instant::now();
             if last_change.elapsed() >= Duration::from_secs(4) && cur > MIN_BITRATE {
                 cur = (cur * 7 / 10).max(MIN_BITRATE);
-                log(format!("[auto] {why} → bitrate reduzido para {cur} Mbps"));
+                log(crate::tr!("[auto] {why} → bitrate reduzido para {cur} Mbps", "[auto] {why} → bitrate lowered to {cur} Mbps"));
                 let _ = br_tx.send(cur);
                 last_change = Instant::now();
             }
@@ -445,7 +445,7 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
             && last_change.elapsed() >= Duration::from_secs(20)
         {
             cur = (cur * 115 / 100).max(cur + 1).min(ceiling);
-            log(format!("[auto] conexão estável → bitrate aumentado para {cur} Mbps"));
+            log(crate::tr!("[auto] conexão estável → bitrate aumentado para {cur} Mbps", "[auto] stable connection → bitrate raised to {cur} Mbps"));
             let _ = br_tx.send(cur);
             last_change = Instant::now();
             clean_since = Instant::now();
@@ -459,10 +459,10 @@ pub async fn run(o: HostOpts, stop: impl Future<Output = ()>) -> Result<()> {
     let r = run_inner(o, stop).await;
     let error = r.as_ref().err().map(|e| format!("{e:#}"));
     if let Some(e) = &error {
-        log(format!("Erro: {e}"));
+        log(crate::tr!("Erro: {e}", "Error: {e}"));
     }
     state::host(|h| *h = state::HostStatus { error, ..Default::default() });
-    log("Transmissão encerrada.");
+    log(crate::i18n::t("Transmissão encerrada."));
     r
 }
 
@@ -474,26 +474,26 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let mut cap = sources::resolve(&o.source)?;
     if let Source::Window { hwnd, .. } = &o.source {
         if has_gfxcapture(&o.ffmpeg).await {
-            log("Captura nativa de janela ativa (Windows Graphics Capture).");
+            log(crate::i18n::t("Captura nativa de janela ativa (Windows Graphics Capture)."));
             cap = Capture { output_idx: 0, crop: None, hwnd: Some(*hwnd) };
         } else {
-            log("Esta versão do FFmpeg não oferece captura nativa de janela; usando recorte da tela. Atualize o ffmpeg.exe.");
+            log(crate::i18n::t("Esta versão do FFmpeg não oferece captura nativa de janela; usando recorte da tela. Atualize o ffmpeg.exe."));
         }
     }
-    log("Detectando encoder de vídeo...");
+    log(crate::i18n::t("Detectando encoder de vídeo..."));
     let (enc, cpu_copy) = detect_encoder(&o, &cap).await?;
     let start_br = if o.auto_bitrate { (o.bitrate_mbps * 7 / 10).max(MIN_BITRATE) } else { o.bitrate_mbps };
     let src_desc = match &o.source {
-        Source::Monitor(i) => format!("monitor {}", i + 1),
-        Source::Window { title, .. } => format!("janela \"{title}\""),
+        Source::Monitor(i) => crate::tr!("monitor {}", "monitor {}", i + 1),
+        Source::Window { title, .. } => crate::tr!("janela \"{title}\"", "window \"{title}\""),
     };
     log(format!(
         "Encoder: {}{} | {} | {} fps | bitrate {}",
         enc.name(),
-        if cpu_copy { " (cópia via CPU)" } else { " (zero-copy na GPU)" },
+        if cpu_copy { crate::i18n::t(" (cópia via CPU)") } else { crate::i18n::t(" (zero-copy na GPU)") },
         src_desc,
         o.fps,
-        if o.auto_bitrate { format!("automático (até {} Mbps)", o.bitrate_mbps) } else { format!("{} Mbps", o.bitrate_mbps) }
+        if o.auto_bitrate { crate::tr!("automático (até {} Mbps)", "automatic (up to {} Mbps)", o.bitrate_mbps) } else { format!("{} Mbps", o.bitrate_mbps) }
     ));
     state::host(|h| {
         h.encoder = enc.name().into();
@@ -513,18 +513,18 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             Ok(v) => Ok(v),
             Err(e) => {
                 // Captura por processo indisponível (Windows antigo?): cai para o som do PC todo.
-                log(format!("Áudio: captura por aplicativo indisponível ({e:#}); usando todo o áudio do sistema."));
+                log(crate::tr!("Áudio: captura por aplicativo indisponível ({e:#}); usando todo o áudio do sistema.", "Audio: per-application capture unavailable ({e:#}); using all system audio."));
                 audio::start_capture(atx.clone(), audio::CaptureSource::Output(None), mic)
             }
         };
         match started {
             Ok((h, rate, ch)) => {
-                log(format!("Áudio: {desc}{}", if o.mic.is_some() { " + microfone" } else { "" }));
+                log(crate::tr!("Áudio: {desc}{}", "Audio: {desc}{}", if o.mic.is_some() { crate::i18n::t(" + microfone") } else { "" }));
                 _audio_handle = Some(h);
                 Some((rate, ch))
             }
             Err(e) => {
-                log(format!("Áudio desativado: {e:#}"));
+                log(crate::tr!("Áudio desativado: {e:#}", "Audio disabled: {e:#}"));
                 None
             }
         }
@@ -537,63 +537,54 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let (punch_tx, mut punch_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<SocketAddr>>();
     *PUNCH.lock().unwrap() = Some(punch_tx);
     let code = net::security_code(&id.fingerprint);
-    log(format!("Código de segurança deste host: {code}"));
+    log(crate::tr!("Código de segurança deste host: {code}", "This host's security code: {code}"));
     state::host(|h| h.security_code = code);
 
-    let mut addrs: Vec<(SocketAddr, String)> = Vec::new();
+    let mut addrs: Vec<(SocketAddr, invite::AddrKind, String)> = Vec::new();
     let mut mapping = None;
     if o.upnp {
-        log("Solicitando abertura de porta ao roteador (UPnP)...");
+        log(crate::i18n::t("Solicitando abertura de porta ao roteador (UPnP)..."));
         match tokio::time::timeout(Duration::from_secs(8), invite::map_port(o.port)).await {
             Ok(Ok((m, ext))) => {
                 if invite::is_public_v4(ext) {
-                    log(format!("UPnP: porta UDP {} aberta no roteador.", o.port));
-                    addrs.push((SocketAddr::new(ext, o.port), "IPv4 público (porta aberta via UPnP)".into()));
+                    log(crate::tr!("UPnP: porta UDP {} aberta no roteador.", "UPnP: UDP port {} opened on the router.", o.port));
+                    addrs.push((
+                        SocketAddr::new(ext, o.port),
+                        invite::AddrKind::PublicV4,
+                        crate::i18n::t("IPv4 público (porta aberta via UPnP)").into(),
+                    ));
                 } else {
-                    log(format!(
-                        "UPnP: porta aberta, porém o roteador está atrás de CGNAT da operadora (IP externo {ext}). \
-                         Conexões externas por IPv4 não são possíveis; utilize IPv6 ou uma VPN (Tailscale)."
+                    log(crate::tr!("UPnP: porta aberta, porém o roteador está atrás de CGNAT da operadora (IP externo {ext}). \
+                         Conexões externas por IPv4 não são possíveis; utilize IPv6 ou uma VPN (Tailscale).", "UPnP: port opened, but the router is behind the ISP's CGNAT (external IP {ext}). External IPv4 connections are not possible; use IPv6 or a VPN (Tailscale)."
                     ));
                 }
                 mapping = Some(m);
             }
-            Ok(Err(e)) => log(format!("UPnP indisponível: {e:#}")),
-            Err(_) => log("UPnP indisponível: o roteador não respondeu"),
+            Ok(Err(e)) => log(crate::tr!("UPnP indisponível: {e:#}", "UPnP unavailable: {e:#}")),
+            Err(_) => log(crate::i18n::t("UPnP indisponível: o roteador não respondeu")),
         }
     }
-    let locals = invite::local_addrs(o.port);
-    let rank = |k: &str| {
-        if k.starts_with("IPv4") {
-            0
-        } else if k.starts_with("IPv6") {
-            1
-        } else if k.starts_with("VPN") {
-            2
-        } else {
-            3
-        }
-    };
     let mut v6 = 0;
-    for (a, k) in locals {
-        if k.starts_with("IPv6") {
+    for (a, kind, label) in invite::local_addrs(o.port) {
+        if kind == invite::AddrKind::PublicV6 {
             v6 += 1;
             if v6 > 2 {
                 continue;
             }
         }
-        if !addrs.iter().any(|(x, _)| *x == a) {
-            addrs.push((a, k));
+        if !addrs.iter().any(|(x, _, _)| *x == a) {
+            addrs.push((a, kind, label));
         }
     }
-    addrs.sort_by_key(|(_, k)| rank(k));
-    let invite_code = invite::encode(&addrs.iter().map(|(a, _)| *a).collect::<Vec<_>>(), &id.fingerprint);
-    let mut reach: Vec<String> = addrs.iter().map(|(a, k)| format!("{k}: {a}")).collect();
-    if !addrs.iter().any(|(_, k)| k.starts_with("IPv4") || k.starts_with("IPv6") || k.starts_with("VPN")) {
-        reach.push("⚠ Nenhum endereço acessível pela internet foi encontrado; apenas conexões na rede local são possíveis. Consulte a seção \"Conexão pela internet\" do LEIA-ME.".into());
-    } else if addrs.iter().any(|(_, k)| k.starts_with("IPv6")) {
-        reach.push("Obs.: conexões IPv6 exigem que o espectador também tenha IPv6 e que o modem permita conexões de entrada.".into());
+    addrs.sort_by_key(|(_, kind, _)| *kind);
+    let invite_code = invite::encode(&addrs.iter().map(|(a, _, _)| *a).collect::<Vec<_>>(), &id.fingerprint);
+    let mut reach: Vec<String> = addrs.iter().map(|(a, _, label)| format!("{label}: {a}")).collect();
+    if !addrs.iter().any(|(_, kind, _)| kind.is_internet()) {
+        reach.push(crate::i18n::t("⚠ Nenhum endereço acessível pela internet foi encontrado; apenas conexões na rede local são possíveis. Consulte a seção \"Conexão pela internet\" do LEIA-ME.").into());
+    } else if addrs.iter().any(|(_, kind, _)| *kind == invite::AddrKind::PublicV6) {
+        reach.push(crate::i18n::t("Obs.: conexões IPv6 exigem que o espectador também tenha IPv6 e que o modem permita conexões de entrada.").into());
     }
-    log(format!("Transmitindo na porta UDP {}. Convite:\n{invite_code}", o.port));
+    log(crate::tr!("Transmitindo na porta UDP {}. Convite:\n{invite_code}", "Streaming on UDP port {}. Invite:\n{invite_code}", o.port));
     for r in &reach {
         log(format!("  {r}"));
     }
@@ -635,7 +626,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                 let (vtx, atx, viewers, password) = (vtx.clone(), atx.clone(), viewers.clone(), password.clone());
                 tokio::spawn(async move {
                     if let Err(e) = handle_viewer(inc, vtx, atx, audio_fmt, password, viewers).await {
-                        log(format!("[espectador] {e:#}"));
+                        log(crate::tr!("[espectador] {e:#}", "[viewer] {e:#}"));
                     }
                 });
             }
@@ -675,7 +666,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let puncher = async {
         while let Some(addrs) = punch_rx.recv().await {
             let list: Vec<String> = addrs.iter().map(|a| a.ip().to_canonical().to_string()).collect();
-            log(format!("[conexão] liberando espectador ({}) por 20 segundos...", list.join(", ")));
+            log(crate::tr!("[conexão] liberando espectador ({}) por 20 segundos...", "[connection] allowing viewer ({}) for 20 seconds...", list.join(", ")));
             let sock = punch_sock.clone();
             tokio::spawn(async move { net::punch(&sock, &addrs).await });
         }
@@ -717,7 +708,7 @@ async fn handle_viewer(
     let pw = auth.read_to_end(1024).await?;
     if let Some(p) = &password {
         if pw != p.as_bytes() {
-            log(format!("[espectador] {shown} recusado: senha incorreta"));
+            log(crate::tr!("[espectador] {shown} recusado: senha incorreta", "[viewer] {shown} rejected: incorrect password"));
             tokio::time::sleep(Duration::from_secs(1)).await; // freia tentativas de adivinhar a senha
             conn.close(1u32.into(), b"senha incorreta");
             return Ok(());
@@ -726,7 +717,7 @@ async fn handle_viewer(
 
     let lagged = Arc::new(AtomicU64::new(0));
     viewers.lock().unwrap().insert(addr, Viewer { conn: conn.clone(), lagged: lagged.clone() });
-    log(format!("[espectador] + {shown} conectado"));
+    log(crate::tr!("[espectador] + {shown} conectado", "[viewer] + {shown} connected"));
 
     let video = {
         let conn = conn.clone();
@@ -810,8 +801,8 @@ async fn handle_viewer(
     };
     viewers.lock().unwrap().remove(&addr);
     match res {
-        Err(e) => log(format!("[espectador] - {shown} desconectado ({e})")),
-        Ok(()) => log(format!("[espectador] - {shown} desconectado")),
+        Err(e) => log(crate::tr!("[espectador] - {shown} desconectado ({e})", "[viewer] - {shown} disconnected ({e})")),
+        Ok(()) => log(crate::tr!("[espectador] - {shown} desconectado", "[viewer] - {shown} disconnected")),
     }
     Ok(())
 }

@@ -3,7 +3,8 @@ GAMESTREAM - GUIA DE USO
 
 O GameStream transmite vídeo e áudio com baixa latência entre computadores
 Windows. Abra o gamestream.exe; a interface possui duas abas: Transmitir e
-Assistir.
+Assistir. O menu ⚙ (canto superior direito) permite trocar o idioma
+(Português / English) e o tema visual (Padrão, Agente ou Bioameaça).
 
 ------------------------------------------------------------
 TRANSMITIR

@@ -95,7 +95,7 @@ pub fn audio_apps() -> Vec<(u32, String)> {
                     if pid == 0 || pid == me {
                         continue;
                     }
-                    let name = names.get(&pid).cloned().unwrap_or_else(|| format!("processo {pid}"));
+                    let name = names.get(&pid).cloned().unwrap_or_else(|| crate::tr!("processo {pid}", "process {pid}"));
                     if !out.iter().any(|(_, n)| n.eq_ignore_ascii_case(&name)) {
                         out.push((pid, name));
                     }
@@ -178,11 +178,11 @@ unsafe fn activate(pid: u32, include: bool) -> Result<IAudioClient> {
         Some(&pv as *const BlobPropVariant as *const _),
         &handler,
     )?;
-    rx.recv_timeout(Duration::from_secs(5)).context("o Windows não respondeu à solicitação de captura por aplicativo")?;
+    rx.recv_timeout(Duration::from_secs(5)).context(crate::i18n::t("o Windows não respondeu à solicitação de captura por aplicativo"))?;
     let mut hr = HRESULT(0);
     let mut unk: Option<IUnknown> = None;
     op.GetActivateResult(&mut hr, &mut unk)?;
-    hr.ok().context("captura por aplicativo não suportada (requer Windows 10 versão 2004 ou superior)")?;
+    hr.ok().context(crate::i18n::t("captura por aplicativo não suportada (requer Windows 10 versão 2004 ou superior)"))?;
     Ok(unk.context("captura por processo sem interface")?.cast()?)
 }
 
@@ -270,6 +270,6 @@ pub fn spawn_process_capture(
     match ready_rx.recv() {
         Ok(Ok(())) => Ok(t),
         Ok(Err(e)) => Err(e),
-        Err(_) => bail!("a thread de captura de áudio terminou inesperadamente"),
+        Err(_) => bail!(crate::i18n::t("a thread de captura de áudio terminou inesperadamente")),
     }
 }

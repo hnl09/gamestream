@@ -89,7 +89,8 @@ pub fn mpv_args(mode: &str, title: &str, ipc: Option<&str>) -> Vec<String> {
     }
     if let Some(p) = overlay_script() {
         a.push(format!("--script={}", p.display()));
-        a.push(format!("--script-opts=gs-mode={mode}"));
+        let lang = if crate::settings::is_en() { "en" } else { "pt" };
+        a.push(format!("--script-opts=gs-mode={mode},gs-lang={lang}"));
     }
     if let Some(pipe) = ipc {
         a.push(format!("--input-ipc-server={pipe}"));
@@ -105,9 +106,9 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
         _ = stop => Ok(()),
     };
     match &r {
-        Ok(()) => view_phase(ViewPhase::Idle, "Desconectado."),
+        Ok(()) => view_phase(ViewPhase::Idle, crate::i18n::t("Desconectado.")),
         Err(e) => {
-            log(format!("Erro: {e:#}"));
+            log(crate::tr!("Erro: {e:#}", "Error: {e:#}"));
             view_phase(ViewPhase::Error, format!("{e:#}"));
         }
     }
@@ -117,10 +118,10 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
 async fn run_inner(o: ViewOpts) -> Result<()> {
     let inv = invite::decode(&o.invite, net::DEFAULT_PORT).await?;
     if inv.fingerprint.is_none() {
-        log("Aviso: conexão por IP direto, sem verificação da identidade do transmissor. Recomenda-se usar o convite GS-...");
+        log(crate::i18n::t("Aviso: conexão por IP direto, sem verificação da identidade do transmissor. Recomenda-se usar o convite GS-..."));
     }
-    view_phase(ViewPhase::Connecting, "Conectando...");
-    log(format!("Conectando ({} endereço(s))...", inv.addrs.len()));
+    view_phase(ViewPhase::Connecting, crate::i18n::t("Conectando..."));
+    log(crate::tr!("Conectando ({} endereço(s))...", "Connecting ({} address(es))...", inv.addrs.len()));
     let ep = net::client_endpoint(inv.fingerprint)?;
 
     // Tenta todos os endereços em paralelo, repetindo a cada 2 s pela mesma porta local. Se a conexão
@@ -129,8 +130,8 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let local_port = ep.local_addr()?.port();
     let reply_addrs: Vec<SocketAddr> = invite::local_addrs(local_port)
         .into_iter()
-        .filter(|(a, k)| a.is_ipv6() || k.starts_with("VPN") || k.starts_with("IPv4"))
-        .map(|(a, _)| a)
+        .filter(|(_, kind, _)| kind.is_internet())
+        .map(|(a, _, _)| a)
         .collect();
     let reply_code = (!reply_addrs.is_empty()).then(|| invite::encode_reply(&reply_addrs));
     let wait_total = if inv.fingerprint.is_some() && reply_code.is_some() { 180 } else { 8 };
@@ -153,22 +154,21 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         if !shown && start.elapsed() >= Duration::from_secs(3) {
             if let Some(code) = &reply_code {
                 shown = true;
-                log(format!(
-                    "A conexão direta não respondeu. Envie este código de resposta ao transmissor \
-                     (ele deve usar \"Liberar espectador\"):\n{code}"
+                log(crate::tr!("A conexão direta não respondeu. Envie este código de resposta ao transmissor \
+                     (ele deve usar \"Liberar espectador\"):\n{code}", "The direct connection did not respond. Send this reply code to the streamer (they must use \"Allow viewer\"):\n{code}"
                 ));
                 state::view(|v| {
                     v.reply_code = Some(code.clone());
-                    v.text = "Aguardando o transmissor liberar a conexão...".into();
+                    v.text = crate::i18n::t("Aguardando o transmissor liberar a conexão...").into();
                 });
             }
         }
         if start.elapsed() >= Duration::from_secs(wait_total) {
             let detail = last_err.map(|e| format!(" ({e:#})")).unwrap_or_default();
             bail!(
-                "tempo de conexão esgotado{detail}. Verifique se a transmissão está ativa e se há um caminho de rede \
-                 disponível (código de resposta, VPN, IPv6 ou porta aberta)."
-            );
+                "{}", crate::tr!("tempo de conexão esgotado{detail}. Verifique se a transmissão está ativa e se há um caminho de rede \
+                 disponível (código de resposta, VPN, IPv6 ou porta aberta).", "connection timed out{detail}. Check that the stream is active and that a network path is available (reply code, VPN, IPv6 or open port)."
+            ));
         }
         tokio::select! {
             r = tries.join_next(), if !tries.is_empty() => match r {
@@ -186,7 +186,7 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     // Sem convite (IP direto) não há como saber se é mesmo o host: não manda a senha às cegas.
     if inv.fingerprint.is_none() && o.password.is_some() {
         conn.close(0u32.into(), b"");
-        bail!("por segurança, a senha só é enviada em conexões pelo convite GS-..., que verifica a identidade do transmissor");
+        bail!(crate::i18n::t("por segurança, a senha só é enviada em conexões pelo convite GS-..., que verifica a identidade do transmissor"));
     }
     let mut auth = conn.open_uni().await?;
     auth.write_all(o.password.unwrap_or_default().as_bytes()).await?;
@@ -194,13 +194,12 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let via = conn.remote_address().ip().to_canonical().to_string();
     let code = net::peer_security_code(&conn).unwrap_or_else(|| "?".into());
     let verified = inv.fingerprint.is_some();
-    log(format!(
-        "Conectado a {via} (criptografado, {}). Código de segurança do transmissor: {code}",
-        if verified { "identidade verificada pelo convite" } else { "identidade não verificada" }
+    log(crate::tr!("Conectado a {via} (criptografado, {}). Código de segurança do transmissor: {code}", "Connected to {via} (encrypted, {}). Streamer security code: {code}",
+        if verified { crate::i18n::t("identidade verificada pelo convite") } else { crate::i18n::t("identidade não verificada") }
     ));
     state::view(|v| {
         v.phase = ViewPhase::Connected;
-        v.text = "Conectado".into();
+        v.text = crate::i18n::t("Conectado").into();
         v.peer = via.clone();
         v.code = code.clone();
         v.verified = verified;
@@ -213,7 +212,7 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("player não encontrado ({}). O mpv.exe deve estar na mesma pasta do gamestream.exe", mpv.display()))?;
+        .with_context(|| crate::tr!("player não encontrado ({}). O mpv.exe deve estar na mesma pasta do gamestream.exe", "player not found ({}). mpv.exe must be in the same folder as gamestream.exe", mpv.display()))?;
     let mut stdin = Some(child.stdin.take().unwrap());
 
     let mut tasks = JoinSet::new();
@@ -231,15 +230,15 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                 let mut st = match st {
                     Ok(s) => s,
                     Err(quinn::ConnectionError::ApplicationClosed(c)) => {
-                        break Err(anyhow!("o transmissor encerrou a conexão: {}", String::from_utf8_lossy(&c.reason)));
+                        break Err(anyhow!("{}", crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", String::from_utf8_lossy(&c.reason))));
                     }
-                    Err(e) => break Err(anyhow!("conexão com o transmissor perdida: {e}")),
+                    Err(e) => break Err(anyhow!("{}", crate::tr!("conexão com o transmissor perdida: {e}", "connection to the streamer lost: {e}"))),
                 };
                 let mut kind = [0u8; 1];
                 st.read_exact(&mut kind).await?;
                 match kind[0] {
                     net::STREAM_VIDEO => {
-                        let Some(mut pipe_in) = stdin.take() else { bail!("o transmissor enviou dois fluxos de vídeo") };
+                        let Some(mut pipe_in) = stdin.take() else { bail!(crate::i18n::t("o transmissor enviou dois fluxos de vídeo")) };
                         let (frames, bytes) = (frames.clone(), bytes.clone());
                         tasks.spawn(async move {
                             let mut buf = Vec::new();
@@ -287,19 +286,19 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                                     anyhow::Ok(())
                                 });
                             }
-                            Err(e) => log(format!("Áudio indisponível: {e:#}")),
+                            Err(e) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
                         }
                     }
-                    k => log(format!("fluxo desconhecido: {k}")),
+                    k => log(crate::tr!("fluxo desconhecido: {k}", "unknown stream: {k}")),
                 }
             }
             Some(r) = tasks.join_next() => {
                 break match r? {
-                    Ok(()) => { log("O transmissor encerrou a transmissão."); Ok(()) }
-                    Err(e) => Err(anyhow!("transmissão interrompida: {e:#}")),
+                    Ok(()) => { log(crate::i18n::t("O transmissor encerrou a transmissão.")); Ok(()) }
+                    Err(e) => Err(anyhow!("{}", crate::tr!("transmissão interrompida: {e:#}", "stream interrupted: {e:#}"))),
                 };
             }
-            _ = child.wait() => { log("Janela de vídeo fechada."); break Ok(()); }
+            _ = child.wait() => { log(crate::i18n::t("Janela de vídeo fechada.")); break Ok(()); }
             _ = &mut control => {}
             _ = tick.tick() => {
                 let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
@@ -350,7 +349,7 @@ async fn mpv_control(pipe: &str) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(e) => {
-                    log(format!("[player] controles indisponíveis: {e}"));
+                    log(crate::tr!("[player] controles indisponíveis: {e}", "[player] controls unavailable: {e}"));
                     return std::future::pending().await;
                 }
             }

@@ -4,9 +4,11 @@
 mod audio;
 mod gui;
 mod host;
+mod i18n;
 mod invite;
 mod net;
 mod procaudio;
+mod settings;
 mod sources;
 mod state;
 mod updater;
@@ -242,7 +244,7 @@ fn cli() -> Result<()> {
                     let code = line.trim().trim_start_matches('\u{feff}');
                     if code.starts_with("GS-R-") {
                         if let Err(e) = host::release_viewer(code) {
-                            state::log(format!("Código de resposta: {e:#}"));
+                            state::log(crate::tr!("Código de resposta: {e:#}", "Reply code: {e:#}"));
                         }
                     }
                     line.clear();

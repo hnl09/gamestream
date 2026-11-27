@@ -79,12 +79,12 @@ pub fn check() -> Result<Option<Release>> {
     let body = match agent().get(&url).set("Accept", "application/vnd.github+json").call() {
         Ok(r) => r.into_string()?,
         Err(ureq::Error::Status(404, _)) => {
-            bail!("nenhuma versão publicada encontrada")
+            bail!(crate::i18n::t("nenhuma versão publicada encontrada"))
         }
-        Err(e) => return Err(e).context("não foi possível conectar ao GitHub"),
+        Err(e) => return Err(e).context(crate::i18n::t("não foi possível conectar ao GitHub")),
     };
     let v: serde_json::Value = serde_json::from_str(&body)?;
-    let tag = v["tag_name"].as_str().context("resposta inesperada do GitHub")?.to_string();
+    let tag = v["tag_name"].as_str().context(crate::i18n::t("resposta inesperada do GitHub"))?.to_string();
     if parse_version(&tag) <= parse_version(VERSION) {
         return Ok(None);
     }
@@ -96,7 +96,7 @@ pub fn check() -> Result<Option<Release>> {
             .and_then(|a| a["browser_download_url"].as_str())
             .map(|s| s.to_string())
     };
-    let exe_url = find("gamestream.exe").context("a nova versão não contém o gamestream.exe")?;
+    let exe_url = find("gamestream.exe").context(crate::i18n::t("a nova versão não contém o gamestream.exe"))?;
     Ok(Some(Release { tag, exe_url, exe_sha_url: find("gamestream.exe.sha256") }))
 }
 
@@ -106,12 +106,12 @@ pub fn check_in_background() {
         set_state(UpdateState::Checking);
         match check() {
             Ok(Some(r)) => {
-                log(format!("Atualização disponível: {} (versão instalada: v{VERSION}).", r.tag));
+                log(crate::tr!("Atualização disponível: {} (versão instalada: v{VERSION}).", "Update available: {} (installed: v{VERSION}).", r.tag));
                 set_state(UpdateState::Available(r));
             }
             Ok(None) => set_state(UpdateState::UpToDate),
             Err(e) => {
-                log(format!("[atualização] {e:#}"));
+                log(crate::tr!("[atualização] {e:#}", "[update] {e:#}"));
                 set_state(UpdateState::Error(format!("{e:#}")));
             }
         }
@@ -120,7 +120,7 @@ pub fn check_in_background() {
 
 /// Baixa `url` reportando o progresso (0..1).
 fn download(url: &str, mut progress: impl FnMut(f32)) -> Result<Vec<u8>> {
-    let resp = agent().get(url).call().with_context(|| format!("falha ao baixar {url}"))?;
+    let resp = agent().get(url).call().with_context(|| crate::tr!("falha ao baixar {url}", "failed to download {url}"))?;
     let total: usize = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut reader = resp.into_reader();
     let mut out = Vec::with_capacity(total);
@@ -144,14 +144,14 @@ fn sha256_hex(data: &[u8]) -> String {
 
 fn verify(data: &[u8], sha_url: Option<&str>) -> Result<()> {
     let Some(url) = sha_url else {
-        log("[atualização] versão sem arquivo .sha256; verificação de integridade ignorada");
+        log(crate::i18n::t("[atualização] versão sem arquivo .sha256; verificação de integridade ignorada"));
         return Ok(());
     };
     let expected = String::from_utf8(download(url, |_| {})?)?;
     let expected = expected.split_whitespace().next().unwrap_or("").to_lowercase();
     let got = sha256_hex(data);
     if expected != got {
-        bail!("falha na verificação de integridade (SHA-256). Atualização cancelada.");
+        bail!(crate::i18n::t("falha na verificação de integridade (SHA-256). Atualização cancelada."));
     }
     Ok(())
 }
@@ -176,7 +176,7 @@ pub fn install(rel: &Release) -> Result<PathBuf> {
     let cur = std::env::current_exe()?;
     let dir = exe_dir()?;
     let new = dir.join("gamestream.new.exe");
-    std::fs::write(&new, &data).context("sem permissão de gravação na pasta do GameStream")?;
+    std::fs::write(&new, &data).context(crate::i18n::t("sem permissão de gravação na pasta do GameStream"))?;
     // O Windows deixa renomear um .exe em uso (mas não apagar).
     let old = dir.join("gamestream.old.exe");
     let _ = std::fs::remove_file(&old);
@@ -185,7 +185,7 @@ pub fn install(rel: &Release) -> Result<PathBuf> {
         let _ = std::fs::rename(&old, &cur); // desfaz
         return Err(e.into());
     }
-    log(format!("Atualizado para {}.", rel.tag));
+    log(crate::tr!("Atualizado para {}.", "Updated to {}.", rel.tag));
     Ok(cur)
 }
 
@@ -197,7 +197,7 @@ pub fn apply(rel: Release) {
             std::process::exit(0);
         }
         Err(e) => {
-            log(format!("[atualização] {e:#}"));
+            log(crate::tr!("[atualização] {e:#}", "[update] {e:#}"));
             set_state(UpdateState::Error(format!("{e:#}")));
         }
     });
@@ -225,7 +225,7 @@ pub fn ensure_ffmpeg() -> Result<String> {
     if ffmpeg_works(Path::new("ffmpeg")) {
         return Ok("ffmpeg".into());
     }
-    log("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Este download ocorre apenas uma vez.");
+    log(crate::i18n::t("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Este download ocorre apenas uma vez."));
     *FFMPEG_PROGRESS.lock().unwrap() = Some(0.0);
     let r = (|| -> Result<String> {
         let (base, latest) = download_base();
@@ -234,23 +234,23 @@ pub fn ensure_ffmpeg() -> Result<String> {
                 // Versão sem release (ex.: compilada localmente): tenta a última release.
                 download(&format!("{latest}/ffmpeg.exe.gz"), |p| *FFMPEG_PROGRESS.lock().unwrap() = Some(p))
             })
-            .context("não foi possível baixar o FFmpeg")?;
+            .context(crate::i18n::t("não foi possível baixar o FFmpeg"))?;
         let sha = download(&format!("{base}/ffmpeg.exe.gz.sha256"), |_| {})
             .or_else(|_| download(&format!("{latest}/ffmpeg.exe.gz.sha256"), |_| {}));
         if let Ok(sha) = sha {
             let expected = String::from_utf8_lossy(&sha).split_whitespace().next().unwrap_or("").to_lowercase();
             if expected != sha256_hex(&gz) {
-                bail!("falha na verificação de integridade do FFmpeg (SHA-256)");
+                bail!(crate::i18n::t("falha na verificação de integridade do FFmpeg (SHA-256)"));
             }
         }
         let mut exe = Vec::new();
-        flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut exe).context("arquivo do FFmpeg corrompido")?;
+        flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut exe).context(crate::i18n::t("arquivo do FFmpeg corrompido"))?;
         let tmp = dir.join("ffmpeg.exe.part");
         std::fs::File::create(&tmp)
             .and_then(|mut f| f.write_all(&exe))
-            .context("sem permissão de gravação na pasta do GameStream")?;
+            .context(crate::i18n::t("sem permissão de gravação na pasta do GameStream"))?;
         std::fs::rename(&tmp, &local)?;
-        log("FFmpeg instalado.");
+        log(crate::i18n::t("FFmpeg instalado."));
         Ok(local.to_string_lossy().into_owned())
     })();
     *FFMPEG_PROGRESS.lock().unwrap() = None;

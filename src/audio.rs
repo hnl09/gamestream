@@ -49,12 +49,12 @@ pub enum AudioSel {
 impl AudioSel {
     pub fn label(&self) -> String {
         match self {
-            AudioSel::GameWindow => "🎮 Aplicativo transmitido (somente o áudio da janela)".into(),
-            AudioSel::AllExceptDiscord => "Áudio do sistema, exceto Discord".into(),
-            AudioSel::App { name, .. } => format!("Aplicativo: {name}"),
-            AudioSel::DefaultOutput => "🔊 Áudio do sistema (inclui Discord)".into(),
-            AudioSel::Output(n) => format!("🔊 Saída: {n}"),
-            AudioSel::Input(n) => format!("🎤 Entrada: {n}"),
+            AudioSel::GameWindow => crate::i18n::t("🎮 Aplicativo transmitido (somente o áudio da janela)").into(),
+            AudioSel::AllExceptDiscord => crate::i18n::t("Áudio do sistema, exceto Discord").into(),
+            AudioSel::App { name, .. } => crate::tr!("Aplicativo: {name}", "Application: {name}"),
+            AudioSel::DefaultOutput => crate::i18n::t("🔊 Áudio do sistema (inclui Discord)").into(),
+            AudioSel::Output(n) => crate::tr!("🔊 Saída: {n}", "🔊 Output: {n}"),
+            AudioSel::Input(n) => crate::tr!("🎤 Entrada: {n}", "🎤 Input: {n}"),
         }
     }
 }
@@ -96,9 +96,9 @@ fn find_output(name: Option<&str>) -> Result<cpal::Device> {
         if let Some(d) = host.output_devices()?.find(|d| d.name().ok().as_deref() == Some(n)) {
             return Ok(d);
         }
-        crate::state::log(format!("[áudio] \"{n}\" não encontrado; usando o dispositivo padrão"));
+        crate::state::log(crate::tr!("[áudio] \"{n}\" não encontrado; usando o dispositivo padrão", "[audio] \"{n}\" not found; using the default device"));
     }
-    host.default_output_device().context("nenhum dispositivo de saída de áudio")
+    host.default_output_device().context(crate::i18n::t("nenhum dispositivo de saída de áudio"))
 }
 
 use anyhow::{bail, Context, Result};
@@ -221,7 +221,7 @@ fn start_source(src: &CaptureSource, q: Queue, stop: Arc<AtomicBool>) -> Result<
                 let dev = cpal::default_host()
                     .input_devices()?
                     .find(|d| d.name().ok().as_deref() == Some(n.as_str()))
-                    .with_context(|| format!("entrada de áudio \"{n}\" não encontrada"))?;
+                    .with_context(|| crate::tr!("entrada de áudio \"{n}\" não encontrada", "audio input \"{n}\" not found"))?;
                 let cfg = dev.default_input_config()?;
                 build_device_capture(&dev, cfg, q)
             })?;
@@ -242,7 +242,7 @@ fn build_device_capture(
         SampleFormat::F32 => build_capture::<f32>(dev, &scfg, q)?,
         SampleFormat::I16 => build_capture::<i16>(dev, &scfg, q)?,
         SampleFormat::I32 => build_capture::<i32>(dev, &scfg, q)?,
-        f => bail!("formato de áudio não suportado: {f:?}"),
+        f => bail!("{}", crate::tr!("formato de áudio não suportado: {f:?}", "unsupported audio format: {f:?}")),
     };
     stream.play()?;
     Ok((stream, rate, ch))
@@ -262,7 +262,7 @@ where
             tmp.extend(data.iter().map(|&s| <f32 as FromSample<T>>::from_sample_(s)));
             push_queue(&q, rs.process(&tmp));
         },
-        |e| crate::state::log(format!("[áudio] erro na captura: {e}")),
+        |e| crate::state::log(crate::tr!("[áudio] erro na captura: {e}", "[audio] capture error: {e}")),
         None,
     )?)
 }
@@ -290,9 +290,9 @@ pub fn start_capture(
             Ok(h) => {
                 streams.extend(h);
                 queues.push((q, gain));
-                crate::state::log(format!("[áudio] microfone ligado: {dev}"));
+                crate::state::log(crate::tr!("[áudio] microfone ligado: {dev}", "[audio] microphone on: {dev}"));
             }
-            Err(e) => crate::state::log(format!("[áudio] microfone indisponível: {e:#}")),
+            Err(e) => crate::state::log(crate::tr!("[áudio] microfone indisponível: {e:#}", "[audio] microphone unavailable: {e:#}")),
         }
     }
 
@@ -368,7 +368,7 @@ pub fn start_player(in_rate: u32, in_ch: u16, device: Option<String>) -> Result<
             SampleFormat::F32 => build_output::<f32>(&dev, &scfg, q)?,
             SampleFormat::I16 => build_output::<i16>(&dev, &scfg, q)?,
             SampleFormat::I32 => build_output::<i32>(&dev, &scfg, q)?,
-            f => bail!("formato de áudio não suportado: {f:?}"),
+            f => bail!("{}", crate::tr!("formato de áudio não suportado: {f:?}", "unsupported audio format: {f:?}")),
         };
         stream.play()?;
         Ok((stream, rate, ch))
@@ -438,7 +438,7 @@ where
                 };
             }
         },
-        |e| crate::state::log(format!("[áudio] erro na reprodução: {e}")),
+        |e| crate::state::log(crate::tr!("[áudio] erro na reprodução: {e}", "[audio] playback error: {e}")),
         None,
     )?)
 }

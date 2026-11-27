@@ -8,6 +8,8 @@
 -- O volume é guardado em user-data/gs/* e o GameStream (que toca o áudio) acompanha pela IPC.
 
 local mode = mp.get_opt("gs-mode") or "viewer" -- "viewer" | "preview"
+local en = mp.get_opt("gs-lang") == "en"
+local function L(pt, eng) return en and eng or pt end
 local has_audio = mode == "viewer"
 
 local MAX_ZOOM = 3 -- log2: 2^3 = 800%
@@ -140,7 +142,7 @@ local function render(show)
     local H, pad, gap = 40, 10, 8
     local items = {}
     if has_audio then
-        items[#items + 1] = { id = "mute", w = 78, label = muted and "Ativar som" or "Silenciar" }
+        items[#items + 1] = { id = "mute", w = 78, label = muted and L("Ativar som", "Unmute") or L("Silenciar", "Mute") }
         items[#items + 1] = { id = "vol", w = 130 }
         items[#items + 1] = { id = "voltxt", w = 46 }
     end
@@ -148,7 +150,7 @@ local function render(show)
     items[#items + 1] = { id = "ztxt", w = 58 }
     items[#items + 1] = { id = "zin", w = 34, label = "+" }
     items[#items + 1] = { id = "zreset", w = 44, label = "1:1" }
-    items[#items + 1] = { id = "fs", w = 96, label = mp.get_property_native("fullscreen") and "Sair" or "Tela cheia" }
+    items[#items + 1] = { id = "fs", w = 96, label = mp.get_property_native("fullscreen") and L("Sair", "Exit") or L("Tela cheia", "Fullscreen") }
     if stats ~= "" then
         items[#items + 1] = { id = "info", w = 34, label = "i" }
     end
@@ -188,7 +190,7 @@ local function render(show)
         above = above - 22
     end
     if zpct > 100 then
-        ass[#ass + 1] = text(x0 + total, above, "Arraste para mover  ·  botão do meio restaura", 15, C_DIM, 6)
+        ass[#ass + 1] = text(x0 + total, above, L("Arraste para mover  ·  botão do meio restaura", "Drag to pan  ·  middle button resets"), 15, C_DIM, 6)
     end
     overlay.data = table.concat(ass, "\n")
     overlay:update()

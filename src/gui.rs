@@ -13,13 +13,78 @@ use crate::{
     viewer,
 };
 
-const ACCENT: Color32 = Color32::from_rgb(124, 92, 255);
-const LIVE: Color32 = Color32::from_rgb(229, 72, 77);
-const OK: Color32 = Color32::from_rgb(48, 164, 108);
-const BG: Color32 = Color32::from_rgb(22, 23, 28);
-const CARD: Color32 = Color32::from_rgb(32, 34, 41);
-const BORDER: Color32 = Color32::from_rgb(50, 53, 63);
-const MUTED_TXT: Color32 = Color32::from_rgb(150, 154, 168);
+/// Paleta de cores e formas do tema atual.
+#[derive(Clone, Copy)]
+struct Palette {
+    accent: Color32,
+    live: Color32,
+    ok: Color32,
+    bg: Color32,
+    card: Color32,
+    border: Color32,
+    muted: Color32,
+    header: Color32,
+    input: Color32,
+    widget: Color32,
+    widget_hover: Color32,
+    text: Color32,
+    /// Arredondamento dos cards (os demais elementos usam proporções dele).
+    radius: f32,
+}
+
+fn pal() -> Palette {
+    use crate::settings::Theme;
+    let c = Color32::from_rgb;
+    match crate::settings::theme() {
+        Theme::Default => Palette {
+            accent: c(124, 92, 255),
+            live: c(229, 72, 77),
+            ok: c(48, 164, 108),
+            bg: c(22, 23, 28),
+            card: c(32, 34, 41),
+            border: c(50, 53, 63),
+            muted: c(150, 154, 168),
+            header: c(28, 29, 35),
+            input: c(16, 17, 21),
+            widget: c(42, 44, 53),
+            widget_hover: c(52, 55, 66),
+            text: c(235, 236, 240),
+            radius: 10.0,
+        },
+        // "Agente": preto, branco e vermelho carmesim; cantos retos, visual minimalista.
+        Theme::Agent => Palette {
+            accent: c(178, 18, 27),
+            live: c(226, 30, 40),
+            ok: c(205, 205, 205),
+            bg: c(9, 9, 10),
+            card: c(18, 18, 20),
+            border: c(46, 46, 50),
+            muted: c(138, 138, 144),
+            header: c(0, 0, 0),
+            input: c(4, 4, 5),
+            widget: c(30, 30, 33),
+            widget_hover: c(48, 48, 52),
+            text: c(242, 242, 242),
+            radius: 1.0,
+        },
+        // "Bioameaça": verde-escuro de laboratório, verde tóxico e vermelho sangue.
+        Theme::Biohazard => Palette {
+            accent: c(98, 158, 46),
+            live: c(176, 22, 30),
+            ok: c(136, 204, 74),
+            bg: c(9, 13, 8),
+            card: c(17, 23, 15),
+            border: c(46, 62, 38),
+            muted: c(138, 156, 126),
+            header: c(5, 8, 4),
+            input: c(5, 8, 4),
+            widget: c(27, 37, 24),
+            widget_hover: c(40, 54, 34),
+            text: c(226, 234, 214),
+            radius: 4.0,
+        },
+    }
+}
 
 pub fn run() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
@@ -40,18 +105,20 @@ pub fn run() -> eframe::Result<()> {
 }
 
 fn setup_style(ctx: &egui::Context) {
+    let p = pal();
     let mut v = egui::Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = CARD;
-    v.window_stroke = Stroke::new(1.0_f32, BORDER);
-    v.extreme_bg_color = Color32::from_rgb(16, 17, 21);
-    v.selection.bg_fill = ACCENT;
-    v.hyperlink_color = ACCENT;
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(52, 55, 66);
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(42, 44, 53);
-    v.widgets.inactive.rounding = egui::Rounding::same(6.0);
-    v.widgets.hovered.rounding = egui::Rounding::same(6.0);
-    v.widgets.active.rounding = egui::Rounding::same(6.0);
+    v.panel_fill = pal().bg;
+    v.window_fill = pal().card;
+    v.window_stroke = Stroke::new(1.0_f32, pal().border);
+    v.extreme_bg_color = p.input;
+    v.selection.bg_fill = pal().accent;
+    v.hyperlink_color = pal().accent;
+    v.widgets.hovered.weak_bg_fill = p.widget_hover;
+    v.widgets.inactive.weak_bg_fill = p.widget;
+    v.override_text_color = Some(p.text);
+    v.widgets.inactive.rounding = egui::Rounding::same(p.radius * 0.6);
+    v.widgets.hovered.rounding = egui::Rounding::same(p.radius * 0.6);
+    v.widgets.active.rounding = egui::Rounding::same(p.radius * 0.6);
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();
@@ -71,9 +138,9 @@ fn setup_style(ctx: &egui::Context) {
 
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0_f32, BORDER))
-        .rounding(10.0_f32)
+        .fill(pal().card)
+        .stroke(Stroke::new(1.0_f32, pal().border))
+        .rounding(pal().radius)
         .inner_margin(16.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -87,7 +154,7 @@ fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).small().color(MUTED_TXT));
+    ui.label(RichText::new(text).small().color(pal().muted));
 }
 
 fn big_button(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
@@ -95,13 +162,13 @@ fn big_button(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
         [ui.available_width(), 46.0],
         egui::Button::new(RichText::new(text).size(17.0).strong().color(Color32::WHITE))
             .fill(color)
-            .rounding(8.0_f32),
+            .rounding(pal().radius * 0.8),
     )
 }
 
 fn stat(ui: &mut egui::Ui, label: &str, value: String) {
     ui.vertical(|ui| {
-        ui.label(RichText::new(label).small().color(MUTED_TXT));
+        ui.label(RichText::new(label).small().color(pal().muted));
         ui.label(RichText::new(value).size(20.0).strong());
     });
 }
@@ -109,8 +176,8 @@ fn stat(ui: &mut egui::Ui, label: &str, value: String) {
 fn error_box(ui: &mut egui::Ui, msg: &str) {
     egui::Frame::none()
         .fill(Color32::from_rgb(60, 24, 28))
-        .stroke(Stroke::new(1.0_f32, LIVE))
-        .rounding(8.0_f32)
+        .stroke(Stroke::new(1.0_f32, pal().live))
+        .rounding(pal().radius * 0.8)
         .inner_margin(12.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -123,7 +190,7 @@ fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::none()
         .fill(color.gamma_multiply(0.25))
         .stroke(Stroke::new(1.0_f32, color))
-        .rounding(20.0_f32)
+        .rounding(pal().radius * 2.0)
         .inner_margin(egui::Margin::symmetric(10.0, 3.0))
         .show(ui, |ui| {
             // Desenhado à mão: funciona igual em layouts da esquerda ou da direita.
@@ -276,16 +343,16 @@ impl App {
         let source = match self.src_kind {
             SrcKind::Monitor => {
                 let m = self.monitors.get(self.sel_monitor);
-                self.live_desc = m.map(|m| m.label()).unwrap_or("Monitor 1".into());
+                self.live_desc = m.map(|m| m.label()).unwrap_or(crate::i18n::t("Monitor 1").into());
                 Source::Monitor(m.map(|m| m.idx).unwrap_or(0))
             }
             SrcKind::Window => match &self.sel_window {
                 Some((hwnd, title)) => {
-                    self.live_desc = format!("Janela: {title}");
+                    self.live_desc = crate::tr!("Janela: {title}", "Window: {title}");
                     Source::Window { hwnd: *hwnd, title: title.clone() }
                 }
                 None => {
-                    state::host(|h| h.error = Some("Selecione uma janela antes de iniciar a transmissão.".into()));
+                    state::host(|h| h.error = Some(crate::i18n::t("Selecione uma janela antes de iniciar a transmissão.").into()));
                     return;
                 }
             },
@@ -347,19 +414,19 @@ impl App {
             return;
         }
 
-        card(ui, "1. Fonte de vídeo", |ui| {
+        card(ui, crate::i18n::t("1. Fonte de vídeo"), |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.src_kind, SrcKind::Monitor, "🖥  Monitor");
-                ui.selectable_value(&mut self.src_kind, SrcKind::Window, "🎮  Janela específica");
+                ui.selectable_value(&mut self.src_kind, SrcKind::Monitor, crate::i18n::t("🖥  Monitor"));
+                ui.selectable_value(&mut self.src_kind, SrcKind::Window, crate::i18n::t("🎮  Janela específica"));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("⟳").on_hover_text("Atualizar listas de monitores, janelas e áudio").clicked() {
+                    if ui.button("⟳").on_hover_text(crate::i18n::t("Atualizar listas de monitores, janelas e áudio")).clicked() {
                         self.refresh();
                     }
                 });
             });
             match self.src_kind {
                 SrcKind::Monitor => {
-                    let sel = self.monitors.get(self.sel_monitor).map(|m| m.label()).unwrap_or("Monitor 1".into());
+                    let sel = self.monitors.get(self.sel_monitor).map(|m| m.label()).unwrap_or(crate::i18n::t("Monitor 1").into());
                     egui::ComboBox::from_id_salt("monitor")
                         .width(ui.available_width())
                         .selected_text(sel)
@@ -370,7 +437,7 @@ impl App {
                         });
                 }
                 SrcKind::Window => {
-                    let sel = self.sel_window.as_ref().map(|(_, t)| t.clone()).unwrap_or("Selecione a janela...".into());
+                    let sel = self.sel_window.as_ref().map(|(_, t)| t.clone()).unwrap_or(crate::i18n::t("Selecione a janela...").into());
                     egui::ComboBox::from_id_salt("window")
                         .width(ui.available_width())
                         .selected_text(sel)
@@ -379,15 +446,15 @@ impl App {
                                 ui.selectable_value(&mut self.sel_window, Some((w.hwnd, w.title.clone())), &w.title);
                             }
                         });
-                    hint(ui, "Captura nativa do Windows: a janela pode ser movida, redimensionada ou sobreposta sem interromper a transmissão. Evite minimizá-la.");
+                    hint(ui, crate::i18n::t("Captura nativa do Windows: a janela pode ser movida, redimensionada ou sobreposta sem interromper a transmissão. Evite minimizá-la."));
                 }
             }
             ui.add_space(4.0);
-            ui.checkbox(&mut self.preview, "👁  Exibir pré-visualização da transmissão (sem áudio)");
+            ui.checkbox(&mut self.preview, crate::i18n::t("👁  Exibir pré-visualização da transmissão (sem áudio)"));
             hint(
                 ui,
-                "Abre uma janela com a imagem exata recebida pelos espectadores. Se ela estiver no monitor transmitido, \
-                 ocorre o efeito espelho; posicione a pré-visualização em outro monitor.",
+                crate::i18n::t("Abre uma janela com a imagem exata recebida pelos espectadores. Se ela estiver no monitor transmitido, \
+                 ocorre o efeito espelho; posicione a pré-visualização em outro monitor."),
             );
         });
 
@@ -401,10 +468,10 @@ impl App {
             self.last_src_kind = self.src_kind;
         }
 
-        card(ui, "2. Áudio", |ui| {
-            ui.checkbox(&mut self.audio, "Transmitir áudio");
+        card(ui, crate::i18n::t("2. Áudio"), |ui| {
+            ui.checkbox(&mut self.audio, crate::i18n::t("Transmitir áudio"));
             ui.add_enabled_ui(self.audio, |ui| {
-                ui.label("Fonte de áudio:");
+                ui.label(crate::i18n::t("Fonte de áudio:"));
                 let window_mode = self.src_kind == SrcKind::Window;
                 egui::ComboBox::from_id_salt("audio_src")
                     .width(ui.available_width())
@@ -420,7 +487,7 @@ impl App {
                         );
                         if !self.audio_apps.is_empty() {
                             ui.separator();
-                            ui.label(RichText::new("Aplicativo específico (com áudio ativo)").small().color(MUTED_TXT));
+                            ui.label(RichText::new(crate::i18n::t("Aplicativo específico (com áudio ativo)")).small().color(pal().muted));
                             for (pid, name) in &self.audio_apps {
                                 let v = AudioSel::App { pid: *pid, name: name.clone() };
                                 let l = v.label();
@@ -428,7 +495,7 @@ impl App {
                             }
                         }
                         ui.separator();
-                        ui.label(RichText::new("Dispositivo de saída (inclui o Discord)").small().color(MUTED_TXT));
+                        ui.label(RichText::new(crate::i18n::t("Dispositivo de saída (inclui o Discord)")).small().color(pal().muted));
                         ui.selectable_value(&mut self.audio_sel, AudioSel::DefaultOutput, AudioSel::DefaultOutput.label());
                         for d in &self.out_devices {
                             let v = AudioSel::Output(d.clone());
@@ -436,7 +503,7 @@ impl App {
                             ui.selectable_value(&mut self.audio_sel, v, l);
                         }
                         ui.separator();
-                        ui.label(RichText::new("Dispositivos de entrada (mixagem estéreo, placa de captura)").small().color(MUTED_TXT));
+                        ui.label(RichText::new(crate::i18n::t("Dispositivos de entrada (mixagem estéreo, placa de captura)")).small().color(pal().muted));
                         for d in &self.in_devices {
                             let v = AudioSel::Input(d.clone());
                             let l = v.label();
@@ -444,25 +511,25 @@ impl App {
                         }
                     });
                 match &self.audio_sel {
-                    AudioSel::GameWindow => hint(ui, "Somente o áudio do aplicativo transmitido. Discord, navegador e notificações não são incluídos."),
+                    AudioSel::GameWindow => hint(ui, crate::i18n::t("Somente o áudio do aplicativo transmitido. Discord, navegador e notificações não são incluídos.")),
                     AudioSel::AllExceptDiscord => hint(
                         ui,
-                        "Todo o áudio do sistema, exceto o Discord. Evita que participantes de uma chamada de voz ouçam o próprio retorno.",
+                        crate::i18n::t("Todo o áudio do sistema, exceto o Discord. Evita que participantes de uma chamada de voz ouçam o próprio retorno."),
                     ),
-                    AudioSel::App { .. } => hint(ui, "Somente o áudio deste aplicativo. Caso ele não esteja na lista, inicie-o e clique em ⟳."),
+                    AudioSel::App { .. } => hint(ui, crate::i18n::t("Somente o áudio deste aplicativo. Caso ele não esteja na lista, inicie-o e clique em ⟳.")),
                     AudioSel::DefaultOutput | AudioSel::Output(_) => {
                         ui.label(
-                            RichText::new("⚠ Inclui o Discord: durante uma chamada de voz, os participantes ouvirão o retorno das próprias vozes.")
+                            RichText::new(crate::i18n::t("⚠ Inclui o Discord: durante uma chamada de voz, os participantes ouvirão o retorno das próprias vozes."))
                                 .small()
                                 .color(Color32::from_rgb(255, 190, 90)),
                         );
                     }
-                    AudioSel::Input(_) => hint(ui, "Captura um dispositivo de entrada de áudio."),
+                    AudioSel::Input(_) => hint(ui, crate::i18n::t("Captura um dispositivo de entrada de áudio.")),
                 }
 
                 ui.add_space(6.0);
                 let mut mic_on = self.mic.is_some();
-                if ui.checkbox(&mut mic_on, "🎤 Incluir microfone").changed() {
+                if ui.checkbox(&mut mic_on, crate::i18n::t("🎤 Incluir microfone")).changed() {
                     self.mic = if mic_on { audio::default_input().or_else(|| self.in_devices.first().cloned()) } else { None };
                 }
                 if let Some(cur) = self.mic.clone() {
@@ -472,29 +539,29 @@ impl App {
                         }
                     });
                     ui.label(
-                        RichText::new("⚠ Mantenha desativado durante chamadas no Discord: sua voz seria reproduzida em duplicidade (pela chamada e pela transmissão).")
+                        RichText::new(crate::i18n::t("⚠ Mantenha desativado durante chamadas no Discord: sua voz seria reproduzida em duplicidade (pela chamada e pela transmissão)."))
                             .small()
                             .color(Color32::from_rgb(255, 190, 90)),
                     );
                 } else {
-                    hint(ui, "Desativado (recomendado durante chamadas de voz no Discord).");
+                    hint(ui, crate::i18n::t("Desativado (recomendado durante chamadas de voz no Discord)."));
                 }
             });
         });
 
-        card(ui, "3. Qualidade", |ui| {
+        card(ui, crate::i18n::t("3. Qualidade"), |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.auto_bitrate, true, "⚡ Automático");
-                ui.selectable_value(&mut self.auto_bitrate, false, "📌 Fixo");
+                ui.selectable_value(&mut self.auto_bitrate, true, crate::i18n::t("⚡ Automático"));
+                ui.selectable_value(&mut self.auto_bitrate, false, crate::i18n::t("📌 Fixo"));
             });
-            let label = if self.auto_bitrate { "Mbps (máximo)" } else { "Mbps" };
+            let label = if self.auto_bitrate { crate::i18n::t("Mbps (máximo)") } else { crate::i18n::t("Mbps") };
             ui.add(egui::Slider::new(&mut self.bitrate, 3..=60).text(label));
             hint(
                 ui,
                 if self.auto_bitrate {
-                    "Inicia em 70% do máximo, reduz automaticamente quando há perda de pacotes e volta a aumentar quando a conexão se estabiliza. O ajuste acompanha o espectador com a conexão mais lenta."
+                    crate::i18n::t("Inicia em 70% do máximo, reduz automaticamente quando há perda de pacotes e volta a aumentar quando a conexão se estabiliza. O ajuste acompanha o espectador com a conexão mais lenta.")
                 } else {
-                    "Bitrate constante. Espectadores com conexão insuficiente podem ter travamentos."
+                    crate::i18n::t("Bitrate constante. Espectadores com conexão insuficiente podem ter travamentos.")
                 },
             );
             ui.horizontal(|ui| {
@@ -503,23 +570,23 @@ impl App {
                     ui.selectable_value(&mut self.fps, f, f.to_string());
                 }
             });
-            egui::CollapsingHeader::new("Guia de bitrate").show(ui, |ui| bitrate_guide(ui, self.bitrate, &mut self.friends));
+            egui::CollapsingHeader::new(crate::i18n::t("Guia de bitrate")).show(ui, |ui| bitrate_guide(ui, self.bitrate, &mut self.friends));
         });
 
-        card(ui, "4. Acesso e segurança", |ui| {
+        card(ui, crate::i18n::t("4. Acesso e segurança"), |ui| {
             ui.horizontal(|ui| {
-                ui.label("Senha:");
+                ui.label(crate::i18n::t("Senha:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.password)
                         .password(true)
                         .desired_width(ui.available_width())
-                        .hint_text("Recomendado"),
+                        .hint_text(crate::i18n::t("Recomendado")),
                 );
             });
-            ui.checkbox(&mut self.upnp, "Abrir porta automaticamente no roteador (UPnP)");
-            egui::CollapsingHeader::new("Avançado").show(ui, |ui| {
+            ui.checkbox(&mut self.upnp, crate::i18n::t("Abrir porta automaticamente no roteador (UPnP)"));
+            egui::CollapsingHeader::new(crate::i18n::t("Avançado")).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Encoder:");
+                    ui.label(crate::i18n::t("Encoder:"));
                     egui::ComboBox::from_id_salt("enc").selected_text(&self.encoder).show_ui(ui, |ui| {
                         for e in ["auto", "amf", "nvenc", "qsv", "cpu"] {
                             ui.selectable_value(&mut self.encoder, e.to_string(), e);
@@ -539,32 +606,32 @@ impl App {
             card(ui, "", |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Preparando a transmissão...").size(17.0).strong());
+                    ui.label(RichText::new(crate::i18n::t("Preparando a transmissão...")).size(17.0).strong());
                 });
                 if let Some(p) = *crate::updater::FFMPEG_PROGRESS.lock().unwrap() {
-                    ui.label("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Necessário apenas na primeira transmissão.");
+                    ui.label(crate::i18n::t("Baixando o encoder de vídeo (FFmpeg, ~90 MB). Necessário apenas na primeira transmissão."));
                     ui.add(egui::ProgressBar::new(p).show_percentage());
                 } else {
-                    hint(ui, "Detectando o encoder da placa de vídeo e inicializando a conexão.");
+                    hint(ui, crate::i18n::t("Detectando o encoder da placa de vídeo e inicializando a conexão."));
                 }
             });
         } else {
             card(ui, "", |ui| {
                 ui.horizontal(|ui| {
-                    pill(ui, "AO VIVO", LIVE);
+                    pill(ui, crate::i18n::t("AO VIVO"), pal().live);
                     ui.label(RichText::new(&self.live_desc).strong());
                 });
                 ui.add_space(6.0);
                 ui.columns(4, |c| {
-                    stat(&mut c[0], "Espectadores", st.viewers.len().to_string());
-                    stat(&mut c[1], "Bitrate alvo", format!("{} Mbps", st.bitrate));
-                    stat(&mut c[2], "Taxa de saída", format!("{:.1} Mbps", st.mbps));
-                    stat(&mut c[3], "Upload total", format!("{:.0} Mbps", st.mbps * st.viewers.len() as f64));
+                    stat(&mut c[0], crate::i18n::t("Espectadores"), st.viewers.len().to_string());
+                    stat(&mut c[1], crate::i18n::t("Bitrate alvo"), format!("{} Mbps", st.bitrate));
+                    stat(&mut c[2], crate::i18n::t("Taxa de saída"), format!("{:.1} Mbps", st.mbps));
+                    stat(&mut c[3], crate::i18n::t("Upload total"), format!("{:.0} Mbps", st.mbps * st.viewers.len() as f64));
                 });
                 ui.horizontal(|ui| {
                     hint(ui, &format!("Encoder: {}", st.encoder));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = if st.preview_open { "👁  Ocultar pré-visualização" } else { "👁  Exibir pré-visualização" };
+                        let label = if st.preview_open { crate::i18n::t("👁  Ocultar pré-visualização") } else { crate::i18n::t("👁  Exibir pré-visualização") };
                         if ui.button(label).clicked() {
                             self.preview = !st.preview_open;
                             host::set_preview(self.preview);
@@ -573,33 +640,33 @@ impl App {
                 });
             });
 
-            card(ui, "Convite", |ui| {
+            card(ui, crate::i18n::t("Convite"), |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .add(egui::Button::new(RichText::new("📋  Copiar convite").strong().color(Color32::WHITE)).fill(ACCENT))
+                        .add(egui::Button::new(RichText::new(crate::i18n::t("📋  Copiar convite")).strong().color(Color32::WHITE)).fill(pal().accent))
                         .clicked()
                     {
                         if let Some(code) = &st.invite {
                             ui.output_mut(|o| o.copied_text = code.clone());
-                            state::log("Convite copiado.");
+                            state::log(crate::i18n::t("Convite copiado."));
                         }
                     }
-                    if ui.button("Exibir convite").clicked() {
+                    if ui.button(crate::i18n::t("Exibir convite")).clicked() {
                         self.popup = st.invite.clone();
                     }
                 });
-                ui.label(format!("🔒 Código de segurança: {}", st.security_code));
-                egui::CollapsingHeader::new("Endereços de conexão").show(ui, |ui| {
+                ui.label(crate::tr!("🔒 Código de segurança: {}", "🔒 Security code: {}", st.security_code));
+                egui::CollapsingHeader::new(crate::i18n::t("Endereços de conexão")).show(ui, |ui| {
                     for r in &st.reach {
                         hint(ui, r);
                     }
                 });
             });
 
-            card(ui, "Liberar espectador", |ui| {
+            card(ui, crate::i18n::t("Liberar espectador"), |ui| {
                 hint(
                     ui,
-                    "Se um espectador não conseguir conectar, ele receberá um código de resposta (GS-R-...).                      Cole o código aqui para liberar a conexão através do firewall do seu roteador.",
+                    crate::i18n::t("Se um espectador não conseguir conectar, ele receberá um código de resposta (GS-R-...). Cole o código aqui para liberar a conexão através do firewall do seu roteador."),
                 );
                 ui.horizontal(|ui| {
                     ui.add(
@@ -607,28 +674,28 @@ impl App {
                             .hint_text("GS-R-...")
                             .desired_width(ui.available_width() - 90.0),
                     );
-                    if ui.add_enabled(!self.reply_input.trim().is_empty(), egui::Button::new("Liberar")).clicked() {
+                    if ui.add_enabled(!self.reply_input.trim().is_empty(), egui::Button::new(crate::i18n::t("Liberar"))).clicked() {
                         self.reply_msg = Some(match host::release_viewer(&self.reply_input) {
                             Ok(_) => {
                                 self.reply_input.clear();
-                                (true, "Liberação enviada. O espectador deve conectar em alguns segundos.".into())
+                                (true, crate::i18n::t("Liberação enviada. O espectador deve conectar em alguns segundos.").into())
                             }
                             Err(e) => (false, format!("{e:#}")),
                         });
                     }
                 });
                 if let Some((ok, msg)) = &self.reply_msg {
-                    let col = if *ok { OK } else { Color32::from_rgb(255, 190, 90) };
+                    let col = if *ok { pal().ok } else { Color32::from_rgb(255, 190, 90) };
                     ui.label(RichText::new(msg).small().color(col));
                 }
             });
 
-            card(ui, "Espectadores conectados", |ui| {
+            card(ui, crate::i18n::t("Espectadores conectados"), |ui| {
                 if st.preview_open {
-                    ui.label(RichText::new("🖥  Pré-visualização local (sem áudio)").color(MUTED_TXT));
+                    ui.label(RichText::new(crate::i18n::t("🖥  Pré-visualização local (sem áudio)")).color(pal().muted));
                 }
                 if st.viewers.is_empty() {
-                    hint(ui, "Nenhum espectador conectado. Compartilhe o convite e a senha.");
+                    hint(ui, crate::i18n::t("Nenhum espectador conectado. Compartilhe o convite e a senha."));
                 }
                 for v in &st.viewers {
                     ui.label(format!("👤  {v}"));
@@ -648,24 +715,24 @@ impl App {
             return;
         }
 
-        card(ui, "Conectar a uma transmissão", |ui| {
+        card(ui, crate::i18n::t("Conectar a uma transmissão"), |ui| {
             ui.add_enabled_ui(!running, |ui| {
-                ui.label("Convite:");
+                ui.label(crate::i18n::t("Convite:"));
                 ui.add(
                     egui::TextEdit::multiline(&mut self.invite)
                         .desired_rows(3)
                         .desired_width(f32::INFINITY)
                         .font(egui::TextStyle::Monospace)
-                        .hint_text("Cole o convite (GS-...) recebido do transmissor"),
+                        .hint_text(crate::i18n::t("Cole o convite (GS-...) recebido do transmissor")),
                 );
                 ui.horizontal(|ui| {
-                    ui.label("Senha:");
+                    ui.label(crate::i18n::t("Senha:"));
                     ui.add(egui::TextEdit::singleline(&mut self.view_password).password(true).desired_width(ui.available_width()));
                 });
-                ui.label("Saída de áudio:");
-                let sel = self.view_out.clone().unwrap_or("Padrão do Windows".into());
+                ui.label(crate::i18n::t("Saída de áudio:"));
+                let sel = self.view_out.clone().unwrap_or(crate::i18n::t("Padrão do Windows").into());
                 egui::ComboBox::from_id_salt("view_out").width(ui.available_width()).selected_text(sel).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.view_out, None, "Padrão do Windows");
+                    ui.selectable_value(&mut self.view_out, None, crate::i18n::t("Padrão do Windows"));
                     for d in &self.out_devices {
                         ui.selectable_value(&mut self.view_out, Some(d.clone()), format!("🔊 {d}"));
                     }
@@ -680,28 +747,28 @@ impl App {
             card(ui, "", |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Conectando...").size(17.0).strong());
+                    ui.label(RichText::new(crate::i18n::t("Conectando...")).size(17.0).strong());
                 });
                 if let Some(code) = &vs.reply_code {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("A conexão direta não respondeu.").strong());
+                    ui.label(RichText::new(crate::i18n::t("A conexão direta não respondeu.")).strong());
                     ui.label(
-                        "Envie o código de resposta abaixo ao transmissor. Ele deve colá-lo em                          \"Liberar espectador\"; a conexão será concluída automaticamente.",
+                        crate::i18n::t("Envie o código de resposta abaixo ao transmissor. Ele deve colá-lo em \"Liberar espectador\"; a conexão será concluída automaticamente."),
                     );
                     egui::Frame::none()
-                        .fill(Color32::from_rgb(16, 17, 21))
-                        .rounding(8.0_f32)
+                        .fill(pal().input)
+                        .rounding(pal().radius * 0.8)
                         .inner_margin(10.0)
                         .show(ui, |ui| {
-                            ui.add(egui::Label::new(RichText::new(code).monospace().small().color(MUTED_TXT)).wrap());
+                            ui.add(egui::Label::new(RichText::new(code).monospace().small().color(pal().muted)).wrap());
                         });
                     if ui
-                        .add(egui::Button::new(RichText::new("📋  Copiar código de resposta").strong().color(Color32::WHITE)).fill(ACCENT))
+                        .add(egui::Button::new(RichText::new(crate::i18n::t("📋  Copiar código de resposta")).strong().color(Color32::WHITE)).fill(pal().accent))
                         .clicked()
                     {
                         ui.output_mut(|o| o.copied_text = code.clone());
                     }
-                    hint(ui, "Aguardando por até 3 minutos.");
+                    hint(ui, crate::i18n::t("Aguardando por até 3 minutos."));
                 }
             });
         }
@@ -710,14 +777,14 @@ impl App {
     fn view_live_ui(&mut self, ui: &mut egui::Ui, vs: &state::ViewStatus) {
         card(ui, "", |ui| {
             ui.horizontal(|ui| {
-                pill(ui, "CONECTADO", OK);
+                pill(ui, crate::i18n::t("CONECTADO"), pal().ok);
                 ui.label(RichText::new(&vs.peer).strong());
             });
             if vs.verified {
-                ui.label(format!("🔒 Conexão criptografada · identidade do transmissor verificada · código {}", vs.code));
+                ui.label(crate::tr!("🔒 Conexão criptografada · identidade do transmissor verificada · código {}", "🔒 Encrypted connection · streamer identity verified · code {}", vs.code));
             } else {
                 ui.label(
-                    RichText::new(format!("⚠ Conexão criptografada, porém a identidade do transmissor não foi verificada (conexão por IP) · código {}", vs.code))
+                    RichText::new(crate::tr!("⚠ Conexão criptografada, porém a identidade do transmissor não foi verificada (conexão por IP) · código {}", "⚠ Encrypted connection, but the streamer's identity was not verified (IP connection) · code {}", vs.code))
                         .color(Color32::from_rgb(255, 190, 90)),
                 );
             }
@@ -725,31 +792,31 @@ impl App {
             let s = &vs.stats;
             let warn = Color32::from_rgb(255, 190, 90);
             ui.columns(4, |c| {
-                stat(&mut c[0], "Ping", format!("{} ms", s.ping_ms));
-                stat(&mut c[1], "FPS", s.fps.to_string());
+                stat(&mut c[0], crate::i18n::t("Ping"), format!("{} ms", s.ping_ms));
+                stat(&mut c[1], crate::i18n::t("FPS"), s.fps.to_string());
                 c[2].vertical(|ui| {
-                    ui.label(RichText::new("Perda de pacotes").small().color(MUTED_TXT));
+                    ui.label(RichText::new(crate::i18n::t("Perda de pacotes")).small().color(pal().muted));
                     let col = if s.loss >= 2.0 { warn } else { Color32::WHITE };
                     ui.label(RichText::new(format!("{:.1}%", s.loss)).size(20.0).strong().color(col));
                 });
-                stat(&mut c[3], "Taxa recebida", format!("{:.1} Mbps", s.mbps));
+                stat(&mut c[3], crate::i18n::t("Taxa recebida"), format!("{:.1} Mbps", s.mbps));
             });
             if s.loss >= 2.0 {
-                hint(ui, "Perda de pacotes elevada: a conexão (ou o Wi-Fi) está instável. Com bitrate automático, o transmissor reduzirá a taxa.");
+                hint(ui, crate::i18n::t("Perda de pacotes elevada: a conexão (ou o Wi-Fi) está instável. Com bitrate automático, o transmissor reduzirá a taxa."));
             }
         });
 
         // Volume: a mesma informação do painel dentro da janela do vídeo (sincronizado nos dois sentidos).
         let mut ctl = state::VIEW_CTL.lock().unwrap().clone();
-        card(ui, "Som", |ui| {
+        card(ui, crate::i18n::t("Som"), |ui| {
             ui.horizontal(|ui| {
-                let label = if ctl.muted { "Ativar som" } else { "Silenciar" };
+                let label = if ctl.muted { crate::i18n::t("Ativar som") } else { crate::i18n::t("Silenciar") };
                 if ui.button(label).clicked() {
                     ctl.muted = !ctl.muted;
                 }
                 let mut pct = ctl.volume * 100.0;
                 if ui
-                    .add_enabled(!ctl.muted, egui::Slider::new(&mut pct, 0.0..=200.0).fixed_decimals(0).suffix("%").text("volume"))
+                    .add_enabled(!ctl.muted, egui::Slider::new(&mut pct, 0.0..=200.0).fixed_decimals(0).suffix("%").text(crate::i18n::t("volume")))
                     .changed()
                 {
                     ctl.volume = pct / 100.0;
@@ -757,27 +824,27 @@ impl App {
             });
         });
 
-        card(ui, "Janela de vídeo", |ui| {
+        card(ui, crate::i18n::t("Janela de vídeo"), |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Tela cheia").clicked() {
+                if ui.button(crate::i18n::t("Tela cheia")).clicked() {
                     ctl.fullscreen_toggles += 1;
                 }
-                ui.checkbox(&mut ctl.on_top, "Manter sobre as demais janelas");
+                ui.checkbox(&mut ctl.on_top, crate::i18n::t("Manter sobre as demais janelas"));
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("Controles na janela de vídeo").strong());
+            ui.label(RichText::new(crate::i18n::t("Controles na janela de vídeo")).strong());
             for (k, v) in [
-                ("Mover o mouse", "exibe o painel de controles no canto inferior direito"),
-                ("Roda do mouse", "zoom a partir da posição do cursor (para cima amplia, para baixo reduz)"),
-                ("Arrastar", "com zoom ativo, desloca a imagem"),
-                ("Botão do meio", "restaura o tamanho original"),
-                ("Duplo clique / F", "tela cheia"),
-                ("M · 9 · 0", "silenciar · diminuir · aumentar volume"),
-                ("I", "fixa as estatísticas no canto da tela"),
+                (crate::i18n::t("Mover o mouse"), crate::i18n::t("exibe o painel de controles no canto inferior direito")),
+                (crate::i18n::t("Roda do mouse"), crate::i18n::t("zoom a partir da posição do cursor (para cima amplia, para baixo reduz)")),
+                (crate::i18n::t("Arrastar"), crate::i18n::t("com zoom ativo, desloca a imagem")),
+                (crate::i18n::t("Botão do meio"), crate::i18n::t("restaura o tamanho original")),
+                (crate::i18n::t("Duplo clique / F"), crate::i18n::t("tela cheia")),
+                ("M · 9 · 0", crate::i18n::t("silenciar · diminuir · aumentar volume")),
+                ("I", crate::i18n::t("fixa as estatísticas no canto da tela")),
             ] {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(k).strong().color(ACCENT));
-                    ui.label(RichText::new(v).color(MUTED_TXT));
+                    ui.label(RichText::new(k).strong().color(pal().accent));
+                    ui.label(RichText::new(v).color(pal().muted));
                 });
             }
         });
@@ -796,12 +863,12 @@ impl App {
         match self.tab {
             Tab::Host => {
                 if self.host_running() {
-                    if big_button(ui, "■   Parar transmissão", LIVE).clicked() {
+                    if big_button(ui, crate::i18n::t("■   Parar transmissão"), pal().live).clicked() {
                         if let Some(t) = &mut self.host_task {
                             t.stop();
                         }
                     }
-                } else if big_button(ui, "▶   Iniciar transmissão", ACCENT).clicked() {
+                } else if big_button(ui, crate::i18n::t("▶   Iniciar transmissão"), pal().accent).clicked() {
                     self.start_host();
                 }
             }
@@ -809,7 +876,7 @@ impl App {
                 if self.view_running() {
                     let connected = state::VIEW.lock().unwrap().phase == ViewPhase::Connected;
                     let (label, color) =
-                        if connected { ("■   Desconectar", LIVE) } else { ("Cancelar", Color32::from_rgb(70, 72, 82)) };
+                        if connected { (crate::i18n::t("■   Desconectar"), pal().live) } else { (crate::i18n::t("Cancelar"), pal().widget_hover) };
                     if big_button(ui, label, color).clicked() {
                         if let Some(t) = &mut self.view_task {
                             t.stop();
@@ -818,7 +885,7 @@ impl App {
                 } else {
                     let enabled = !self.invite.trim().is_empty();
                     ui.add_enabled_ui(enabled, |ui| {
-                        if big_button(ui, "▶   Conectar", ACCENT).clicked() {
+                        if big_button(ui, crate::i18n::t("▶   Conectar"), pal().accent).clicked() {
                             self.start_view();
                         }
                     });
@@ -843,35 +910,35 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .fixed_size([460.0, 0.0])
-            .frame(egui::Frame::window(&ctx.style()).inner_margin(22.0).rounding(12.0_f32))
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(22.0).rounding(pal().radius * 1.2))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Transmissão iniciada").size(22.0).strong());
+                    ui.label(RichText::new(crate::i18n::t("Transmissão iniciada")).size(22.0).strong());
                     ui.add_space(4.0);
-                    ui.label(RichText::new("✅ Convite copiado para a área de transferência").color(OK).strong());
-                    ui.label("Compartilhe o convite (Ctrl+V) e envie a senha por um canal separado.");
+                    ui.label(RichText::new(crate::i18n::t("✅ Convite copiado para a área de transferência")).color(pal().ok).strong());
+                    ui.label(crate::i18n::t("Compartilhe o convite (Ctrl+V) e envie a senha por um canal separado."));
                 });
                 ui.add_space(8.0);
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(16, 17, 21))
-                    .rounding(8.0_f32)
+                    .fill(pal().input)
+                    .rounding(pal().radius * 0.8)
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(RichText::new(&code).monospace().small().color(MUTED_TXT)).wrap(),
+                            egui::Label::new(RichText::new(&code).monospace().small().color(pal().muted)).wrap(),
                         );
                     });
                 ui.add_space(6.0);
-                ui.label(format!("🔒 Código de segurança: {code_sec}"));
-                hint(ui, "Os espectadores verão este mesmo código. Um código diferente indica interceptação da conexão.");
+                ui.label(crate::tr!("🔒 Código de segurança: {code_sec}", "🔒 Security code: {code_sec}"));
+                hint(ui, crate::i18n::t("Os espectadores verão este mesmo código. Um código diferente indica interceptação da conexão."));
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("📋 Copiar novamente").clicked() {
+                    if ui.button(crate::i18n::t("📋 Copiar novamente")).clicked() {
                         ui.output_mut(|o| o.copied_text = code.clone());
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new(RichText::new("   OK   ").strong().color(Color32::WHITE)).fill(ACCENT))
+                            .add(egui::Button::new(RichText::new("   OK   ").strong().color(Color32::WHITE)).fill(pal().accent))
                             .clicked()
                         {
                             close = true;
@@ -887,16 +954,16 @@ impl App {
 
 fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
     egui::Grid::new("guide").striped(true).num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-        ui.strong("Mbps");
-        ui.strong("Qualidade esperada (HEVC)");
+        ui.strong(crate::i18n::t("Mbps"));
+        ui.strong(crate::i18n::t("Qualidade esperada (HEVC)"));
         ui.end_row();
         for (r, q) in [
-            ("3–5", "720p adequado; 1080p perde nitidez em movimentos rápidos"),
-            ("8–10", "1080p60 boa"),
-            ("15", "1080p60 muito boa (recomendado)"),
-            ("20–25", "1080p excelente / 1440p60 boa / ultrawide boa"),
-            ("30–40", "1440p excelente / 4K60 boa"),
-            ("50–60", "4K excelente (recomendado apenas em rede local)"),
+            ("3–5", crate::i18n::t("720p adequado; 1080p perde nitidez em movimentos rápidos")),
+            ("8–10", crate::i18n::t("1080p60 boa")),
+            ("15", crate::i18n::t("1080p60 muito boa (recomendado)")),
+            ("20–25", crate::i18n::t("1080p excelente / 1440p60 boa / ultrawide boa")),
+            ("30–40", crate::i18n::t("1440p excelente / 4K60 boa")),
+            ("50–60", crate::i18n::t("4K excelente (recomendado apenas em rede local)")),
         ] {
             ui.label(r);
             ui.label(q);
@@ -904,13 +971,13 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
         }
     });
     ui.add_space(6.0);
-    ui.label(format!("• Download mínimo por espectador: {:.0} Mbps.", chosen as f64 * 1.3));
+    ui.label(crate::tr!("• Download mínimo por espectador: {:.0} Mbps.", "• Minimum download per viewer: {:.0} Mbps.", chosen as f64 * 1.3));
     ui.horizontal(|ui| {
-        ui.label("• Upload mínimo para");
+        ui.label(crate::i18n::t("• Upload mínimo para"));
         ui.add(egui::DragValue::new(friends).range(1..=16));
-        ui.label(format!("espectador(es): {:.0} Mbps.", (chosen * *friends) as f64 * 1.2));
+        ui.label(crate::tr!("espectador(es): {:.0} Mbps.", "viewer(s): {:.0} Mbps.", (chosen * *friends) as f64 * 1.2));
     });
-    hint(ui, "Considere a velocidade de upload medida no teste de velocidade, não a de download.");
+    hint(ui, crate::i18n::t("Considere a velocidade de upload medida no teste de velocidade, não a de download."));
 }
 
 impl eframe::App for App {
@@ -922,7 +989,7 @@ impl eframe::App for App {
         if let Some(code) = invite {
             if self.host_running() && self.popup_done_for.as_ref() != Some(&code) {
                 ctx.output_mut(|o| o.copied_text = code.clone());
-                state::log("Convite copiado para a área de transferência.");
+                state::log(crate::i18n::t("Convite copiado para a área de transferência."));
                 self.popup = Some(code.clone());
                 self.popup_done_for = Some(code);
                 self.tab = Tab::Host;
@@ -932,44 +999,68 @@ impl eframe::App for App {
         let host_live = self.host_running();
         let view_live = self.view_running();
         egui::TopBottomPanel::top("top")
-            .frame(egui::Frame::none().fill(Color32::from_rgb(28, 29, 35)).inner_margin(egui::Margin::symmetric(16.0, 10.0)))
+            .frame(egui::Frame::none().fill(pal().header).inner_margin(egui::Margin::symmetric(16.0, 10.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("GameStream").size(20.0).strong().color(ACCENT));
+                    ui.label(RichText::new("GameStream").size(20.0).strong().color(pal().accent));
                     ui.add_space(12.0);
-                    ui.selectable_value(&mut self.tab, Tab::Host, RichText::new("  Transmitir  ").size(16.0));
-                    ui.selectable_value(&mut self.tab, Tab::View, RichText::new("  Assistir  ").size(16.0));
+                    ui.selectable_value(&mut self.tab, Tab::Host, RichText::new(crate::i18n::t("  Transmitir  ")).size(16.0));
+                    ui.selectable_value(&mut self.tab, Tab::View, RichText::new(crate::i18n::t("  Assistir  ")).size(16.0));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.toggle_value(&mut self.show_log, "Log");
+                        ui.menu_button("⚙", |ui| {
+                            ui.label(RichText::new(crate::i18n::t("Idioma")).small().color(pal().muted));
+                            let en = crate::settings::is_en();
+                            if ui.radio(!en, "Português").clicked() {
+                                crate::settings::set_en(false);
+                                ui.close_menu();
+                            }
+                            if ui.radio(en, "English").clicked() {
+                                crate::settings::set_en(true);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            ui.label(RichText::new(crate::i18n::t("Tema")).small().color(pal().muted));
+                            let cur = crate::settings::theme();
+                            for th in crate::settings::Theme::ALL {
+                                if ui.radio(cur == th, th.label()).clicked() {
+                                    crate::settings::set_theme(th);
+                                    setup_style(ui.ctx());
+                                    ui.close_menu();
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(crate::i18n::t("Idioma e tema"));
                         let upd = crate::updater::UPDATE.lock().unwrap().clone();
                         match upd {
                             crate::updater::UpdateState::Available(rel) => {
                                 let b = egui::Button::new(
-                                    RichText::new(format!("⬆ Atualizar para {}", rel.tag)).color(Color32::WHITE).strong(),
+                                    RichText::new(crate::tr!("⬆ Atualizar para {}", "⬆ Update to {}", rel.tag)).color(Color32::WHITE).strong(),
                                 )
-                                .fill(OK);
-                                if ui.add(b).on_hover_text("Baixa a nova versão e reinicia o GameStream").clicked() {
+                                .fill(pal().ok);
+                                if ui.add(b).on_hover_text(crate::i18n::t("Baixa a nova versão e reinicia o GameStream")).clicked() {
                                     crate::updater::apply(rel);
                                 }
                             }
                             crate::updater::UpdateState::Downloading(tag, p) => {
-                                ui.label(RichText::new(format!("Baixando {tag}... {:.0}%", p * 100.0)).small().color(MUTED_TXT));
+                                ui.label(RichText::new(crate::tr!("Baixando {tag}... {:.0}%", "Downloading {tag}... {:.0}%", p * 100.0)).small().color(pal().muted));
                             }
                             crate::updater::UpdateState::Error(e) => {
-                                ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(MUTED_TXT))
-                                    .on_hover_text(format!("Não foi possível verificar atualizações: {e}"));
+                                ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(pal().muted))
+                                    .on_hover_text(crate::tr!("Não foi possível verificar atualizações: {e}", "Could not check for updates: {e}"));
                             }
                             _ => {
-                                ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(MUTED_TXT));
+                                ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(pal().muted));
                             }
                         }
                         if host_live {
-                            pill(ui, "AO VIVO", LIVE);
+                            pill(ui, crate::i18n::t("AO VIVO"), pal().live);
                         } else if view_live {
                             if state::VIEW.lock().unwrap().phase == ViewPhase::Connected {
-                                pill(ui, "CONECTADO", OK);
+                                pill(ui, crate::i18n::t("CONECTADO"), pal().ok);
                             } else {
-                                pill(ui, "CONECTANDO", Color32::from_rgb(255, 190, 90));
+                                pill(ui, crate::i18n::t("CONECTANDO"), Color32::from_rgb(255, 190, 90));
                             }
                         }
                     });
@@ -980,8 +1071,8 @@ impl eframe::App for App {
             egui::TopBottomPanel::bottom("log").resizable(true).default_height(180.0).show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Detalhes técnicos").strong());
-                    if ui.small_button("Copiar log").clicked() {
+                    ui.label(RichText::new(crate::i18n::t("Detalhes técnicos")).strong());
+                    if ui.small_button(crate::i18n::t("Copiar log")).clicked() {
                         let all = state::LOG.lock().unwrap().join("\n");
                         ui.output_mut(|o| o.copied_text = all);
                     }
@@ -995,11 +1086,11 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::bottom("actions")
-            .frame(egui::Frame::none().fill(Color32::from_rgb(28, 29, 35)).inner_margin(egui::Margin::symmetric(16.0, 12.0)))
+            .frame(egui::Frame::none().fill(pal().header).inner_margin(egui::Margin::symmetric(16.0, 12.0)))
             .show(ctx, |ui| self.action_bar(ui));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).inner_margin(16.0))
+            .frame(egui::Frame::none().fill(pal().bg).inner_margin(16.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
                     Tab::Host => self.host_ui(ui),

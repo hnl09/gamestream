@@ -12,7 +12,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 
 [**Baixar a versão mais recente**](https://github.com/hnl09/gamestream/releases/latest)
 
-<sub>*Low-latency game and screen streaming for Windows (GPU-accelerated HEVC over encrypted QUIC). The interface is in Brazilian Portuguese.*</sub>
+<sub>*Low-latency game and screen streaming for Windows (GPU-accelerated HEVC over encrypted QUIC). The interface is available in English and Brazilian Portuguese.*</sub>
 
 <img src="docs/janela-de-video.png" alt="Janela de vídeo com painel de controles e estatísticas" width="820">
 
@@ -32,6 +32,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Controles na janela de vídeo**: volume, zoom a partir do cursor, tela cheia e estatísticas em tempo real (ping, FPS, perda de pacotes e taxa recebida).
 - **Pré-visualização local** da transmissão, sem áudio.
 - **Atualização automática** com verificação de integridade.
+- **Português e inglês**, com três temas visuais (Padrão, Agente e Bioameaça), selecionáveis no menu ⚙.
 
 <table>
   <tr>

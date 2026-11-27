@@ -156,7 +156,7 @@ pub async fn read_msg(r: &mut quinn::RecvStream, buf: &mut Vec<u8>) -> Result<bo
     }
     let n = u32::from_le_bytes(len) as usize;
     if n > 32 << 20 {
-        bail!("mensagem grande demais ({n} bytes)");
+        bail!("{}", crate::tr!("mensagem grande demais ({n} bytes)", "message too large ({n} bytes)"));
     }
     buf.resize(n, 0);
     r.read_exact(buf).await?;
@@ -182,7 +182,7 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
             let fp: [u8; 32] = Sha256::digest(end_entity.as_ref()).into();
             if fp != pin {
                 return Err(rustls::Error::General(
-                    "a identidade do transmissor não corresponde ao convite (possível interceptação)".into(),
+                    crate::i18n::t("a identidade do transmissor não corresponde ao convite (possível interceptação)").into(),
                 ));
             }
         }

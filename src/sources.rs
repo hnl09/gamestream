@@ -35,7 +35,7 @@ pub struct MonitorInfo {
 
 impl MonitorInfo {
     pub fn label(&self) -> String {
-        let primary = if self.x == 0 && self.y == 0 { " (principal)" } else { "" };
+        let primary = if self.x == 0 && self.y == 0 { crate::i18n::t(" (principal)") } else { "" };
         format!("Monitor {} — {}x{}{}", self.idx + 1, self.w, self.h, primary)
     }
 }
@@ -128,10 +128,10 @@ pub fn resolve(src: &Source) -> Result<Capture> {
         Source::Window { hwnd, title } => unsafe {
             let h = HWND(*hwnd as *mut c_void);
             if !IsWindow(h).as_bool() {
-                bail!("a janela \"{title}\" não existe mais");
+                bail!("{}", crate::tr!("a janela \"{title}\" não existe mais", "the window \"{title}\" no longer exists"));
             }
             if IsIconic(h).as_bool() {
-                bail!("a janela \"{title}\" está minimizada");
+                bail!("{}", crate::tr!("a janela \"{title}\" está minimizada", "the window \"{title}\" is minimized"));
             }
             let mut r = RECT::default();
             GetClientRect(h, &mut r)?;
@@ -143,13 +143,13 @@ pub fn resolve(src: &Source) -> Result<Capture> {
             let m = mons
                 .iter()
                 .find(|m| cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h)
-                .context("a janela não está em um monitor do adaptador de vídeo principal")?;
+                .context(crate::i18n::t("a janela não está em um monitor do adaptador de vídeo principal"))?;
             let ox = (p.x - m.x).max(0);
             let oy = (p.y - m.y).max(0);
             let cw = w.min(m.w - ox) & !1; // HEVC precisa de dimensões pares
             let ch = hh.min(m.h - oy) & !1;
             if cw < 64 || ch < 64 {
-                bail!("a janela \"{title}\" é pequena demais");
+                bail!("{}", crate::tr!("a janela \"{title}\" é pequena demais", "the window \"{title}\" is too small"));
             }
             Ok(Capture { output_idx: m.idx, crop: Some((ox, oy, cw, ch)), hwnd: None })
         },
