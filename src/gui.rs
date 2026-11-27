@@ -395,6 +395,14 @@ struct App {
     want_kbm: bool,
     /// Fotos das salas recentes (código -> PNG), recarregadas de tempos em tempos.
     recent_avatars: (std::time::Instant, HashMap<String, Arc<Vec<u8>>>),
+    /// Tela inicial de atualização (como o Discord): verifica e instala antes de abrir o app.
+    startup: Option<std::time::Instant>,
+    /// Já mandou instalar a atualização (não repete).
+    update_started: bool,
+    /// Atualização automática suspensa nesta execução (proteção contra loop).
+    update_blocked: bool,
+    /// Última interação do usuário (atualização com o app aberto só depois de um tempo parado).
+    last_input: std::time::Instant,
 }
 
 impl App {
@@ -447,6 +455,10 @@ impl App {
             want_pad: true,
             want_kbm: true,
             recent_avatars: (std::time::Instant::now() - Duration::from_secs(60), HashMap::new()),
+            startup: (!crate::updater::auto_update_disabled()).then(std::time::Instant::now),
+            update_started: false,
+            update_blocked: false,
+            last_input: std::time::Instant::now(),
         };
         a.refresh();
         crate::updater::check_in_background();
@@ -924,6 +936,12 @@ impl App {
                                     if v.name != v.ip {
                                         ui.label(RichText::new(&v.ip).small().color(pal().muted));
                                     }
+                                    if v.version.is_empty() {
+                                        ui.label(RichText::new(crate::i18n::t("versão antiga")).small().color(warn))
+                                            .on_hover_text(crate::i18n::t("Sem chat, lista da sala e jogar junto. Peça para ele abrir o GameStream de novo para atualizar."));
+                                    } else if v.version != crate::updater::VERSION {
+                                        ui.label(RichText::new(format!("v{}", v.version)).small().color(pal().muted));
+                                    }
                                 });
                                 let loss_col = if v.loss >= 2.0 { warn } else { pal().muted };
                                 ui.horizontal(|ui| {
@@ -1183,6 +1201,15 @@ impl App {
                     }
                 });
             });
+        }
+
+        if vs.host_version.as_deref() == Some("") {
+            card(ui, "", |ui| {
+                ui.label(RichText::new(crate::i18n::t("⚠ O transmissor está numa versão antiga do GameStream")).strong().color(Color32::from_rgb(255, 190, 90)));
+                hint(ui, crate::i18n::t("O vídeo e o som funcionam, mas o chat, a lista da sala e o jogar junto só aparecem quando os dois estiverem na versão nova. Peça para ele fechar e abrir o GameStream: a atualização é automática."));
+            });
+        } else if vs.host_version.as_deref().is_some_and(|v| v != crate::updater::VERSION) {
+            hint(ui, &crate::tr!("O transmissor está na versão v{}; você, na v{}.", "The streamer is on v{}; you are on v{}.", vs.host_version.clone().unwrap_or_default(), crate::updater::VERSION));
         }
 
         if vs.has_control {
@@ -1467,6 +1494,71 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
 }
 
 impl App {
+    /// Atualização automática. Ao abrir: verifica (até ~6 s) e, havendo versão nova, instala e
+    /// reinicia antes de mostrar o app. Com o app aberto: instala sozinho só se não houver transmissão
+    /// nem conexão e o usuário estiver há 2 minutos sem mexer; senão fica o botão "Atualizar" no topo.
+    /// Devolve true enquanto a tela de atualização ocupa a janela.
+    fn auto_update(&mut self, ctx: &egui::Context) -> bool {
+        use crate::updater::UpdateState;
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving()) {
+            self.last_input = std::time::Instant::now();
+        }
+        let upd = crate::updater::UPDATE.lock().unwrap().clone();
+        let idle = !self.host_running() && !self.view_running() && !self.profile_open;
+        if let UpdateState::Available(rel) = &upd {
+            let at_startup = self.startup.is_some();
+            let quiet = idle && self.last_input.elapsed() > Duration::from_secs(120);
+            let looping = crate::updater::just_updated_to().as_deref() == Some(rel.tag.as_str());
+            if looping && !self.update_blocked {
+                self.update_blocked = true; // não tenta de novo nesta execução; o botão continua no topo
+                state::log(crate::tr!(
+                    "[atualização] {} foi instalada, mas o app continua na v{}: atualização automática suspensa.",
+                    "[update] {} was installed but the app is still v{}: automatic update paused.",
+                    rel.tag,
+                    crate::updater::VERSION
+                ));
+            }
+            if !self.update_started && !self.update_blocked && !crate::updater::auto_update_disabled() && (at_startup || quiet) {
+                self.update_started = true;
+                state::log(crate::tr!("Instalando a atualização {} automaticamente...", "Installing update {} automatically...", rel.tag));
+                crate::updater::apply(rel.clone());
+            }
+        }
+        // Tela de atualização: enquanto verifica/baixa na abertura, ou durante uma instalação automática.
+        let installing = self.update_started && matches!(upd, UpdateState::Available(_) | UpdateState::Downloading(..));
+        let checking = self.startup.is_some_and(|t| t.elapsed() < Duration::from_secs(6))
+            && matches!(upd, UpdateState::Idle | UpdateState::Checking);
+        if !(installing || checking) {
+            self.startup = None;
+            return false;
+        }
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(pal().bg)).show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.35);
+                ui.label(RichText::new("GameStream").size(28.0).strong().color(pal().accent));
+                ui.add_space(14.0);
+                match &upd {
+                    UpdateState::Downloading(tag, p) => {
+                        ui.label(RichText::new(crate::tr!("Atualizando para {tag}...", "Updating to {tag}...")).size(16.0));
+                        ui.add_space(8.0);
+                        ui.add(egui::ProgressBar::new(*p).desired_width(320.0).show_percentage());
+                        ui.add_space(6.0);
+                        hint(ui, crate::i18n::t("O GameStream reabre sozinho em seguida."));
+                    }
+                    UpdateState::Available(rel) => {
+                        ui.spinner();
+                        ui.label(crate::tr!("Atualizando para {}...", "Updating to {}...", rel.tag));
+                    }
+                    _ => {
+                        ui.spinner();
+                        ui.label(RichText::new(crate::i18n::t("Procurando atualizações...")).color(pal().muted));
+                    }
+                }
+            });
+        });
+        true
+    }
+
     /// Janela "Seu perfil": nome (até 24 caracteres, emojis permitidos) e foto.
     fn profile_window(&mut self, ctx: &egui::Context) {
         if !self.profile_open {
@@ -1540,6 +1632,9 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(250));
+        if self.auto_update(ctx) {
+            return;
+        }
 
         // Abre o popup (e copia o convite) assim que a transmissão fica pronta.
         let invite = state::HOST.lock().unwrap().invite.clone();
@@ -1603,11 +1698,18 @@ impl eframe::App for App {
                         let upd = crate::updater::UPDATE.lock().unwrap().clone();
                         match upd {
                             crate::updater::UpdateState::Available(rel) => {
-                                let b = egui::Button::new(
-                                    RichText::new(crate::tr!("⬆ Atualizar para {}", "⬆ Update to {}", rel.tag)).color(Color32::WHITE).strong(),
-                                )
-                                .fill(pal().ok);
-                                if ui.add(b).on_hover_text(crate::i18n::t("Baixa a nova versão e reinicia o GameStream")).clicked() {
+                                // Texto curto quando a barra está apertada (não cobre as abas).
+                                let label = if ui.available_width() > 260.0 {
+                                    crate::tr!("⬆ Atualizar para {}", "⬆ Update to {}", rel.tag)
+                                } else {
+                                    format!("⬆ {}", rel.tag)
+                                };
+                                let b = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong()).fill(pal().ok);
+                                if ui
+                                    .add(b)
+                                    .on_hover_text(crate::tr!("Atualizar para {}: baixa a nova versão e reinicia o GameStream", "Update to {}: downloads the new version and restarts GameStream", rel.tag))
+                                    .clicked()
+                                {
                                     crate::updater::apply(rel);
                                 }
                             }

@@ -40,7 +40,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Salas recentes**: as salas em que você entrou ficam na aba Assistir para reconectar com um clique.
 - **Painel por espectador**: ping, perda de pacotes e taxa de cada espectador, além dos pedidos de controle.
 - **Pré-visualização local** da transmissão, sem áudio.
-- **Atualização automática** com verificação de integridade.
+- **Atualização automática, como no Discord**: ao abrir, o aplicativo instala a versão nova (conferida por SHA-256) e reabre sozinho. Com o app aberto, só atualiza se não houver transmissão nem conexão ativa. Ao conectar, transmissor e espectador trocam a versão e o app avisa quando um dos lados está desatualizado.
 - **Português e inglês**, com três temas visuais (Padrão, Agente e Bioameaça), selecionáveis no menu ⚙.
 
 <table>

@@ -98,9 +98,14 @@ ASSISTIR
 ------------------------------------------------------------
 ATUALIZAÇÕES
 ------------------------------------------------------------
-  Quando houver uma nova versão, o botão "Atualizar" aparece no topo do
-  aplicativo. A atualização é baixada, verificada (SHA-256) e aplicada com
-  reinício automático. Também é possível atualizar pelo terminal:
+  A atualização é automática, como no Discord: ao abrir, o aplicativo
+  procura uma versão nova e, se houver, baixa, confere (SHA-256) e reabre
+  sozinho. Sem internet, ele abre normalmente. Com o app aberto, a versão
+  nova é instalada só quando não há transmissão nem conexão ativa e você
+  está há 2 minutos sem mexer; até lá, o botão "Atualizar" fica no topo.
+  Ao conectar, se você ou o seu amigo estiver numa versão antiga, o app
+  avisa (o vídeo funciona, mas o chat e o jogar junto precisam dos dois
+  atualizados). Também é possível atualizar pelo terminal:
       gamestream update
 
 ------------------------------------------------------------

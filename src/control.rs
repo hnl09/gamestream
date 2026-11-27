@@ -12,6 +12,11 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
+/// Versão do protocolo do canal de controle. Sobe quando uma mudança deixa versões antigas
+/// incompatíveis; o outro lado recusa conexões abaixo de MIN_PROTOCOL.
+pub const PROTOCOL: u32 = 1;
+pub const MIN_PROTOCOL: u32 = 1;
+
 /// Datagrama: estado completo do controle (13 bytes).
 pub const DG_PAD: u8 = 1;
 /// Datagrama: movimento relativo do mouse (dx, dy em i16).

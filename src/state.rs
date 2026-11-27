@@ -60,6 +60,8 @@ pub struct ViewerRow {
     /// Controle remoto pedido pelo espectador e liberado pelo transmissor (bits CTL_PAD/CTL_KBM).
     pub wants: u8,
     pub granted: u8,
+    /// Versão do GameStream do espectador (vazio = versão antiga, sem chat/controle).
+    pub version: String,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -101,6 +103,8 @@ pub struct ViewStatus {
     pub avatars: HashMap<String, Arc<Vec<u8>>>,
     /// O seu id na lista.
     pub my_id: String,
+    /// Versão do GameStream do transmissor; Some("") = versão antiga (sem chat/controle).
+    pub host_version: Option<String>,
 }
 
 /// Números da transmissão para quem assiste (atualizados a cada segundo).

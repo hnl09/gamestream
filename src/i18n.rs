@@ -329,4 +329,11 @@ const PAIRS: &[(&str, &str)] = &[
     ("transmissor", "streamer"),
     ("O transmissor usa uma versão sem chat/controle remoto. Peça para ele atualizar o GameStream.", "The streamer uses a version without chat/remote control. Ask them to update GameStream."),
     ("o vídeo parou de chegar", "the video stopped arriving"),
+    ("versão antiga", "old version"),
+    ("Sem chat, lista da sala e jogar junto. Peça para ele abrir o GameStream de novo para atualizar.", "No chat, room list or play together. Ask them to reopen GameStream to update."),
+    ("⚠ O transmissor está numa versão antiga do GameStream", "⚠ The streamer is on an old GameStream version"),
+    ("O vídeo e o som funcionam, mas o chat, a lista da sala e o jogar junto só aparecem quando os dois estiverem na versão nova. Peça para ele fechar e abrir o GameStream: a atualização é automática.", "Video and sound work, but chat, the room list and play together only appear when both are on the new version. Ask them to close and reopen GameStream: it updates automatically."),
+    ("O GameStream reabre sozinho em seguida.", "GameStream will reopen by itself right after."),
+    ("Procurando atualizações...", "Checking for updates..."),
+    ("O transmissor usa uma versão antiga do GameStream: chat, lista da sala e jogar junto ficam indisponíveis. Peça para ele abrir o app de novo para atualizar.", "The streamer uses an old GameStream version: chat, room list and play together are unavailable. Ask them to reopen the app to update."),
 ];

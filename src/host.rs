@@ -343,6 +343,7 @@ struct Viewer {
     stalled_ms: Arc<AtomicU64>,
     name: String,
     id: String,
+    version: String,
     /// Controle remoto pedido / liberado (bits CTL_PAD | CTL_KBM).
     wants: Arc<AtomicU8>,
     granted: Arc<AtomicU8>,
@@ -1012,6 +1013,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                             mbps: (cur.0 - p.0) as f64 * 8.0 / 2.0 / 1e6,
                             wants: vw.wants.load(Ordering::Relaxed),
                             granted: vw.granted.load(Ordering::Relaxed),
+                            version: vw.version.clone(),
                         }
                     })
                     .collect();
@@ -1128,6 +1130,8 @@ async fn handle_viewer(
     let mut name = shown.to_string();
     let mut token_in: Option<String> = None;
     let mut avatar: Option<Arc<Vec<u8>>> = None;
+    let mut version = String::new();
+    let mut proto = 0u64;
     if let Ok(Ok((send, recv))) = tokio::time::timeout(Duration::from_secs(3), conn.accept_bi()).await {
         let mut lines = BufReader::new(recv).lines();
         if let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_secs(3), lines.next_line()).await {
@@ -1138,9 +1142,17 @@ async fn handle_viewer(
                 }
                 token_in = v["token"].as_str().map(|t| t.chars().take(64).collect());
                 avatar = v["avatar"].as_str().and_then(crate::avatar::from_b64);
+                version = v["v"].as_str().unwrap_or("").chars().take(16).collect();
+                proto = v["p"].as_u64().unwrap_or(1);
             }
         }
         ctl = Some((send, lines));
+    }
+    // Versão incompatível: recusa com uma mensagem clara (o espectador mostra "atualize o GameStream").
+    if ctl.is_some() && proto < control::MIN_PROTOCOL as u64 {
+        log(crate::tr!("[espectador] {shown} recusado: versão {version} antiga demais", "[viewer] {shown} rejected: version {version} is too old"));
+        conn.close(4u32.into(), b"versao antiga: atualize o GameStream");
+        return Ok(());
     }
     let mut who = if name == shown.to_string() { name.clone() } else { format!("{name} ({shown})") };
     if avatar.is_some() {
@@ -1204,6 +1216,7 @@ async fn handle_viewer(
             stalled_ms: stalled_ms.clone(),
             name: name.clone(),
             id: member_id.clone(),
+            version: version.clone(),
             wants: wants.clone(),
             granted: granted.clone(),
         },
@@ -1217,6 +1230,12 @@ async fn handle_viewer(
         log(crate::tr!("[espectador] + {who} reconectado", "[viewer] + {who} reconnected"));
     } else {
         log(crate::tr!("[espectador] + {who} conectado", "[viewer] + {who} connected"));
+    }
+    if ctl.is_none() {
+        log(crate::tr!(
+            "[espectador] {who} usa uma versão antiga do GameStream (sem chat, lista da sala e jogar junto). Peça para ele abrir o app de novo para atualizar.",
+            "[viewer] {who} uses an old GameStream version (no chat, room list or play together). Ask them to reopen the app to update.",
+        ));
     }
 
     // Entrada do espectador no PC do transmissor (só com permissão). Ao sair, solta tudo.
@@ -1321,7 +1340,14 @@ async fn handle_viewer(
                 unreachable!()
             };
             let mut roster_rx = ROSTER.lock().unwrap().as_ref().map(|tx| tx.subscribe());
-            control::send(&mut send, &serde_json::json!({ "t": "welcome", "host": crate::settings::nick(), "token": token, "you": member_id })).await?;
+            control::send(
+                &mut send,
+                &serde_json::json!({
+                    "t": "welcome", "host": crate::settings::nick(), "token": token, "you": member_id,
+                    "v": env!("CARGO_PKG_VERSION"), "p": control::PROTOCOL,
+                }),
+            )
+            .await?;
             let avatars: Vec<serde_json::Value> =
                 MEMBERS.lock().unwrap().iter().filter_map(|e| e.avatar.as_ref().map(|a| avatar_msg(&e.m.id, a))).collect();
             for a in avatars {

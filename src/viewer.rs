@@ -311,7 +311,7 @@ fn closed_error(e: quinn::ConnectionError) -> anyhow::Error {
         quinn::ConnectionError::ApplicationClosed(c) => {
             let why = crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason));
             let msg = crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", why);
-            if matches!(u64::from(c.error_code), 1..=3) {
+            if matches!(u64::from(c.error_code), 1..=4) {
                 anyhow!(Fatal(msg))
             } else {
                 anyhow!(msg)
@@ -551,6 +551,7 @@ async fn connect(o: &ViewOpts, token: Option<&str>, reconnecting: bool) -> Resul
                 "name": crate::settings::nick(),
                 "token": token,
                 "v": env!("CARGO_PKG_VERSION"),
+                "p": crate::control::PROTOCOL,
                 "avatar": crate::avatar::load().map(|a| crate::avatar::to_b64(&a)),
             });
             match crate::control::send(&mut send, &hello).await {
@@ -673,6 +674,8 @@ async fn run_session(
     let (mut last_frames, mut last_bytes, mut last_t) = (0u64, 0u64, std::time::Instant::now());
     let mut pending_first = Some(first);
     let mut have_video = false;
+    let connected_at = std::time::Instant::now();
+    state::view(|s| s.host_version = None);
 
     // Canal de controle: leitura numa tarefa (para não perder mensagens no select), escrita aqui.
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<CtlEv>();
@@ -763,10 +766,18 @@ async fn run_session(
                                         *token = Some(t.chars().take(64).collect());
                                     }
                                     let you: String = v["you"].as_str().unwrap_or("").chars().take(16).collect();
+                                    let hv: String = v["v"].as_str().unwrap_or("?").chars().take(16).collect();
+                                    if v["p"].as_u64().unwrap_or(1) < crate::control::MIN_PROTOCOL as u64 {
+                                        break End::Fatal(anyhow!(Fatal(crate::tr!(
+                                            "o transmissor usa a versão {hv}, antiga demais para esta. Peça para ele abrir o GameStream de novo para atualizar.",
+                                            "the streamer uses version {hv}, too old for this one. Ask them to reopen GameStream to update.",
+                                        ))));
+                                    }
                                     state::view(|s| {
                                         s.host_name = host.clone();
                                         s.has_control = true;
                                         s.my_id = you;
+                                        s.host_version = Some(hv);
                                     });
                                     if let Some(code) = &room_code {
                                         let name = if host.is_empty() { state::view(|s| s.peer.clone()) } else { host.clone() };
@@ -914,6 +925,10 @@ async fn run_session(
                         let rms = (((sq as f64) * 256.0) / n as f64).sqrt() / 32768.0;
                         if rms > 0.0 { (20.0 * rms.log10()).max(-90.0) as f32 } else { -90.0 }
                     });
+                    if connected_at.elapsed() > Duration::from_secs(5) && state::view(|s| s.host_version.is_none()) {
+                        log(crate::i18n::t("O transmissor usa uma versão antiga do GameStream: chat, lista da sala e jogar junto ficam indisponíveis. Peça para ele abrir o app de novo para atualizar."));
+                        state::view(|s| s.host_version = Some(String::new()));
+                    }
                     state::view(|v| {
                         v.stats.audio_db = audio_db;
                         v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;

@@ -56,6 +56,18 @@ fn download_base() -> (String, String) {
     }
 }
 
+/// Atualização automática desligada (para desenvolvimento/testes): GAMESTREAM_NO_AUTOUPDATE=1.
+/// Versão para a qual o app acabou de se atualizar (definida ao reabrir após a atualização).
+/// Se a mesma versão aparecer de novo como "disponível", a release está com o número de versão
+/// errado: não atualiza de novo sozinho (evita ficar reabrindo em loop).
+pub fn just_updated_to() -> Option<String> {
+    std::env::var("GAMESTREAM_UPDATED_TO").ok().filter(|v| !v.is_empty())
+}
+
+pub fn auto_update_disabled() -> bool {
+    std::env::var("GAMESTREAM_NO_AUTOUPDATE").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 fn set_state(s: UpdateState) {
     *UPDATE.lock().unwrap() = s;
 }
@@ -200,7 +212,8 @@ pub fn install(rel: &Release) -> Result<PathBuf> {
 pub fn apply(rel: Release) {
     std::thread::spawn(move || match install(&rel) {
         Ok(cur) => {
-            let _ = std::process::Command::new(&cur).spawn();
+            // O app reaberto sabe para qual versão acabou de atualizar (ver `just_updated_to`).
+            let _ = std::process::Command::new(&cur).env("GAMESTREAM_UPDATED_TO", &rel.tag).spawn();
             std::process::exit(0);
         }
         Err(e) => {
