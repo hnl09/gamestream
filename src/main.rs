@@ -288,6 +288,8 @@ fn cli() -> Result<()> {
                         host::send_chat(t);
                     } else if let Some(r) = code.strip_prefix("react ") {
                         host::send_react(r.trim());
+                    } else if code == "stop" {
+                        host::request_stop();
                     } else if code == "revoke" {
                         host::revoke_all_control();
                     } else if let Some(rest) = code.strip_prefix("allow ") {

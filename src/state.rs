@@ -105,6 +105,8 @@ pub struct ViewStatus {
     pub my_id: String,
     /// Versão do GameStream do transmissor; Some("") = versão antiga (sem chat/controle).
     pub host_version: Option<String>,
+    /// Aviso ao terminar (ex.: "Fulano encerrou a transmissão"), exibido depois de desconectar.
+    pub notice: Option<String>,
 }
 
 /// Números da transmissão para quem assiste (atualizados a cada segundo).

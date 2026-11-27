@@ -1113,6 +1113,14 @@ impl App {
         if vs.phase == ViewPhase::Error && !running {
             error_box(ui, &vs.text);
         }
+        if !running && vs.phase == ViewPhase::Idle {
+            if let Some(n) = &vs.notice {
+                card(ui, "", |ui| {
+                    ui.label(RichText::new(n).size(16.0).strong());
+                    hint(ui, crate::i18n::t("Quando a pessoa voltar a transmitir, a sala aparece como AO VIVO em \"Salas recentes\"; é só clicar em Entrar."));
+                });
+            }
+        }
         if running {
             card(ui, "", |ui| {
                 ui.horizontal(|ui| {

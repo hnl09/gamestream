@@ -280,7 +280,10 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
         v.kbm_active = false;
     });
     match &r {
-        Ok(()) => view_phase(ViewPhase::Idle, crate::i18n::t("Desconectado.")),
+        Ok(()) => {
+            let notice = state::view(|v| v.notice.clone());
+            view_phase(ViewPhase::Idle, notice.unwrap_or_else(|| crate::i18n::t("Desconectado.").into()));
+        }
         Err(e) => {
             log(crate::tr!("Erro: {e:#}", "Error: {e:#}"));
             view_phase(ViewPhase::Error, format!("{e:#}"));
@@ -305,11 +308,28 @@ fn is_fatal(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Fatal>().is_some()
 }
 
+/// O transmissor encerrou a transmissão de propósito (botão "Parar"): não adianta reconectar.
+#[derive(Debug)]
+struct HostEnded;
+
+impl std::fmt::Display for HostEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::i18n::t("o transmissor encerrou a transmissão"))
+    }
+}
+
+impl std::error::Error for HostEnded {}
+
 /// Erro ao encerrar a conexão: códigos 1 (senha), 2 (removido) e 3 (recusado) são definitivos.
 fn closed_error(e: quinn::ConnectionError) -> anyhow::Error {
     match e {
         quinn::ConnectionError::ApplicationClosed(c) => {
-            let why = crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason));
+            let reason = String::from_utf8_lossy(&c.reason).to_string();
+            // Código 5 (versões novas) ou o motivo enviado pelas versões antigas (código 0).
+            if u64::from(c.error_code) == 5 || reason == "transmissao encerrada pelo host" {
+                return anyhow!(HostEnded);
+            }
+            let why = crate::i18n::t_dyn(&reason);
             let msg = crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", why);
             if matches!(u64::from(c.error_code), 1..=4) {
                 anyhow!(Fatal(msg))
@@ -351,6 +371,8 @@ impl Drop for Player {
 enum End {
     /// O usuário fechou a janela do vídeo.
     Closed,
+    /// O transmissor encerrou a transmissão (botão "Parar").
+    HostEnded,
     /// Não adianta reconectar.
     Fatal(anyhow::Error),
     /// A conexão caiu: tenta voltar.
@@ -365,10 +387,19 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let mut lost_since: Option<std::time::Instant> = None;
     let mut attempt = 0u32;
     loop {
-        let joined = connect(&o, token.as_deref(), lost_since.is_some()).await;
+        let osd = player.as_ref().map(|p| p.osd_tx.clone());
+        let joined = connect(&o, token.as_deref(), lost_since.is_some(), osd.as_ref()).await;
         let j = match joined {
             Ok(j) => j,
             Err(e) if lost_since.is_none() || is_fatal(&e) => return Err(e),
+            Err(e) if e.downcast_ref::<HostEnded>().is_some() => {
+                // Encerrou enquanto tentávamos voltar.
+                let name = state::view(|v| if v.host_name.is_empty() { v.peer.clone() } else { v.host_name.clone() });
+                let msg = crate::tr!("📴 {name} encerrou a transmissão.", "📴 {name} ended the stream.");
+                log(&msg);
+                state::view(|v| v.notice = Some(msg));
+                return Ok(());
+            }
             Err(e) => {
                 if lost_since.is_some_and(|t| t.elapsed() > Duration::from_secs(180)) {
                     bail!("{}", crate::tr!("não foi possível reconectar em 3 minutos: {e:#}", "could not reconnect within 3 minutes: {e:#}"));
@@ -403,6 +434,21 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         state::view(|v| v.reconnecting = None);
         match session(j, &o, &mut player, &mut out_rx, &mut token).await {
             End::Closed => return Ok(()),
+            End::HostEnded => {
+                let name = state::view(|v| if v.host_name.is_empty() { v.peer.clone() } else { v.host_name.clone() });
+                let msg = crate::tr!("📴 {name} encerrou a transmissão.", "📴 {name} ended the stream.");
+                log(&msg);
+                state::view(|v| v.notice = Some(msg.clone()));
+                // Mostra o aviso na janela do vídeo por alguns segundos e fecha.
+                if let Some(p) = player.as_mut() {
+                    let _ = p.osd_tx.send(osd_status_cmd(&msg));
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                        _ = p.child.wait() => {}
+                    }
+                }
+                return Ok(());
+            }
             End::Fatal(e) => return Err(e),
             End::Lost(e) => {
                 log(crate::tr!("{e:#}. Tentando reconectar...", "{e:#}. Trying to reconnect..."));
@@ -423,7 +469,21 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
 }
 
 /// Conecta (pelo código da sala ou pelo convite), envia a senha e o nome, e espera a aprovação.
-async fn connect(o: &ViewOpts, token: Option<&str>, reconnecting: bool) -> Result<Joined> {
+async fn connect(
+    o: &ViewOpts,
+    token: Option<&str>,
+    reconnecting: bool,
+    osd: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<Joined> {
+    // Na reconexão, mostra a etapa atual (no app e na janela do vídeo).
+    let step = |text: String| {
+        if reconnecting {
+            state::view(|v| v.reconnecting = Some(text.clone()));
+            if let Some(tx) = osd {
+                let _ = tx.send(osd_status_cmd(&text));
+            }
+        }
+    };
     if !reconnecting {
         view_phase(ViewPhase::Connecting, crate::i18n::t("Conectando..."));
     }
@@ -444,6 +504,7 @@ async fn connect(o: &ViewOpts, token: Option<&str>, reconnecting: bool) -> Resul
     let inv = if let Some(code) = crate::room::parse_code(&o.invite) {
         let server = server.clone().context(crate::i18n::t("servidor de encontro não configurado; use o convite GS-..."))?;
         log(crate::tr!("Procurando a sala {}...", "Looking up room {}...", crate::room::display(&code)));
+        step(crate::tr!("Conexão perdida. Procurando a sala {}...", "Connection lost. Looking up room {}...", crate::room::display(&code)));
         let (s, c, r) = (server, code.clone(), reply_addrs.clone());
         let invite_text = tokio::task::spawn_blocking(move || crate::room::join(&s, &c, &r)).await??;
         let inv = invite::decode(&invite_text, net::DEFAULT_PORT).await?;
@@ -472,6 +533,7 @@ async fn connect(o: &ViewOpts, token: Option<&str>, reconnecting: bool) -> Resul
         log(crate::i18n::t("[sala] transmissor avisado; liberando a conexão automaticamente."));
     }
     log(crate::tr!("Conectando ({} endereço(s))...", "Connecting ({} address(es))...", inv.addrs.len()));
+    step(crate::i18n::t("Conexão perdida. Conectando de novo ao transmissor...").to_string());
     ep.set_default_client_config(net::client_config(inv.fingerprint)?);
 
     // Tenta todos os endereços em paralelo, repetindo a cada 2 s pela mesma porta local. Se a conexão
@@ -576,7 +638,9 @@ async fn connect(o: &ViewOpts, token: Option<&str>, reconnecting: bool) -> Resul
         v.verified = verified;
         v.reply_code = None;
     });
-    // O primeiro fluxo só chega quando o transmissor aprova a entrada (sala de espera).
+    // O primeiro fluxo só chega quando o transmissor aprova a entrada (sala de espera). Se ele
+    // reiniciou a transmissão, quem volta passa de novo pela sala de espera.
+    step(crate::i18n::t("Reconectado ao transmissor; aguardando ele aprovar a sua volta (sala de espera)...").to_string());
     let first = conn.accept_uni().await.map_err(closed_error)?;
     Ok(Joined { ep, conn, first, ctl, room_code, via })
 }
@@ -745,7 +809,13 @@ async fn run_session(
                     Ok(s) => s,
                     Err(e) => {
                         let e = closed_error(e);
-                        break if is_fatal(&e) { End::Fatal(e) } else { End::Lost(e) };
+                        break if e.downcast_ref::<HostEnded>().is_some() {
+                            End::HostEnded
+                        } else if is_fatal(&e) {
+                            End::Fatal(e)
+                        } else {
+                            End::Lost(e)
+                        };
                     }
                 },
                 Some(r) = tasks.join_next() => {

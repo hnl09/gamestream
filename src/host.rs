@@ -98,6 +98,14 @@ struct RemoteSlot {
     notify: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
+/// Pedido de encerrar a transmissão (comando "stop" no terminal).
+static STOP_REQUEST: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// Encerra a transmissão atual como o botão "Parar" (os espectadores recebem o aviso).
+pub fn request_stop() {
+    STOP_REQUEST.notify_one();
+}
+
 /// Envia uma mensagem no chat como transmissor.
 pub fn send_chat(text: &str) {
     if let (Some(tx), Some(text)) = (CHAT.lock().unwrap().as_ref(), control::clean_text(text)) {
@@ -1060,6 +1068,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = controller => Ok(()),
         _ = renew => Ok(()),
         _ = stop => Ok(()),
+        _ = STOP_REQUEST.notified() => Ok(()),
     };
     *PUNCH.lock().unwrap() = None;
     *SWITCH.lock().unwrap() = None;
@@ -1072,7 +1081,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     TOKENS.lock().unwrap().clear();
     REMOTE.lock().unwrap().clear();
     crate::viewer::cleanup_osd_avatars();
-    ep.close(0u32.into(), b"transmissao encerrada pelo host");
+    ep.close(5u32.into(), b"transmissao encerrada pelo host");
     if let Some(m) = &mapping {
         m.remove().await;
     }

@@ -337,4 +337,8 @@ const PAIRS: &[(&str, &str)] = &[
     ("Procurando atualizações...", "Checking for updates..."),
     ("O transmissor usa uma versão antiga do GameStream: chat, lista da sala e jogar junto ficam indisponíveis. Peça para ele abrir o app de novo para atualizar.", "The streamer uses an old GameStream version: chat, room list and play together are unavailable. Ask them to reopen the app to update."),
     ("offline", "offline"),
+    ("Quando a pessoa voltar a transmitir, a sala aparece como AO VIVO em \"Salas recentes\"; é só clicar em Entrar.", "When that person streams again, the room shows as LIVE in \"Recent rooms\"; just click Join."),
+    ("o transmissor encerrou a transmissão", "the streamer ended the stream"),
+    ("Conexão perdida. Conectando de novo ao transmissor...", "Connection lost. Connecting to the streamer again..."),
+    ("Reconectado ao transmissor; aguardando ele aprovar a sua volta (sala de espera)...", "Reconnected to the streamer; waiting for them to approve your return (waiting room)..."),
 ];
