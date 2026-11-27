@@ -20,7 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::state::{self, log};
 
 /// Endereço do servidor de encontro publicado (worker/). Pode ser trocado por GAMESTREAM_SERVER.
-pub const DEFAULT_SERVER: &str = "";
+pub const DEFAULT_SERVER: &str = "https://gamestream-rendezvous.gamestream.workers.dev";
 
 const ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 
