@@ -171,6 +171,8 @@ struct VideoChunk {
     framed: Bytes,
     /// Posição de um VPS (início de keyframe) dentro do chunk, se houver.
     vps: Option<usize>,
+    /// Quando o encoder produziu este trecho (para medir o atraso de cada espectador).
+    at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,7 +196,10 @@ impl Enc {
 
 struct Viewer {
     conn: quinn::Connection,
+    /// Vezes em que o espectador ficou tão para trás que quadros foram descartados.
     lagged: Arc<AtomicU64>,
+    /// Tempo (ms) em que o envio de vídeo ficou travado esperando a rede (buffer de envio cheio).
+    stalled_ms: Arc<AtomicU64>,
 }
 
 type Viewers = Arc<Mutex<HashMap<SocketAddr, Viewer>>>;
@@ -469,7 +474,7 @@ async fn encoder_loop(
                 }
                 bytes_out.fetch_add(n as u64, Ordering::Relaxed);
                 let raw = Bytes::copy_from_slice(&buf[..n]);
-                let _ = vtx.send(VideoChunk { vps: find_vps(&raw), framed: Bytes::from(net::frame(&raw)), raw });
+                let _ = vtx.send(VideoChunk { vps: find_vps(&raw), framed: Bytes::from(net::frame(&raw)), raw, at: Instant::now() });
             }
         };
         tokio::select! {
@@ -530,7 +535,10 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
     let mut cur = start;
     let mut last_change = Instant::now();
     let mut clean_since = Instant::now();
-    let mut prev: HashMap<SocketAddr, (u64, u64, u64)> = HashMap::new();
+    // Bitrate em que a conexão não deu conta da última vez: chegar perto dele de novo exige mais tempo estável.
+    let mut trouble_at: Option<u32> = None;
+    // (pacotes perdidos, enviados, descartes, ms travado) da medição anterior, por espectador.
+    let mut prev: HashMap<SocketAddr, (u64, u64, u64, u64)> = HashMap::new();
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let mut bad: Option<String> = None;
@@ -541,12 +549,23 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
             prev.retain(|a, _| v.contains_key(a));
             for (addr, vw) in v.iter() {
                 let s = vw.conn.stats();
-                let now = (s.path.lost_packets, s.path.sent_packets, vw.lagged.load(Ordering::Relaxed));
-                let (pl, ps, plg) = prev.get(addr).copied().unwrap_or(now);
+                let now = (
+                    s.path.lost_packets,
+                    s.path.sent_packets,
+                    vw.lagged.load(Ordering::Relaxed),
+                    vw.stalled_ms.load(Ordering::Relaxed),
+                );
+                let (pl, ps, plg, pst) = prev.get(addr).copied().unwrap_or(now);
                 let (dl, ds) = (now.0 - pl, now.1 - ps);
+                // Só reduz por congestionamento de verdade: o espectador ficou para trás (quadros
+                // descartados ou envio travado por mais de 15% do tempo) ou a perda é alta. Uma perda
+                // pequena e constante não melhora baixando o bitrate: os pacotes são reenviados e o BBR
+                // mantém a taxa.
                 if now.2 > plg {
                     bad = Some(crate::tr!("{addr} com atraso no recebimento", "{addr} is lagging behind"));
-                } else if ds > 200 && dl * 100 > ds * 2 {
+                } else if now.3 - pst > 300 {
+                    bad = Some(crate::tr!("{addr} não está recebendo na velocidade enviada", "{addr} cannot keep up with the sending rate"));
+                } else if ds > 200 && dl * 100 > ds * 10 {
                     bad = Some(crate::tr!("{addr} com {:.1}% de perda de pacotes", "{addr} has {:.1}% packet loss", dl as f64 * 100.0 / ds as f64));
                 }
                 prev.insert(*addr, now);
@@ -555,23 +574,32 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
         if let Some(why) = bad {
             clean_since = Instant::now();
             if last_change.elapsed() >= Duration::from_secs(4) && cur > MIN_BITRATE {
+                trouble_at = Some(cur);
                 cur = (cur * 7 / 10).max(MIN_BITRATE);
                 log(crate::tr!("[auto] {why} → bitrate reduzido para {cur} Mbps", "[auto] {why} → bitrate lowered to {cur} Mbps"));
                 let _ = br_tx.send(cur);
                 last_change = Instant::now();
             }
-        } else if n_viewers > 0
-            && cur < ceiling
-            && clean_since.elapsed() >= Duration::from_secs(20)
-            && last_change.elapsed() >= Duration::from_secs(20)
-        {
+        } else if n_viewers > 0 && cur < ceiling && {
+            let next = (cur * 115 / 100).max(cur + 1).min(ceiling);
+            // Longe do ponto onde houve problema: sobe a cada 10 s estáveis; perto dele, só após 60 s.
+            let wait = if trouble_at.is_some_and(|t| next * 100 > t * 85) { 60 } else { 10 };
+            clean_since.elapsed() >= Duration::from_secs(wait) && last_change.elapsed() >= Duration::from_secs(10)
+        } {
             cur = (cur * 115 / 100).max(cur + 1).min(ceiling);
+            if trouble_at.is_some_and(|t| cur >= t) {
+                trouble_at = None; // passou do ponto antigo sem problemas: a conexão melhorou
+            }
             log(crate::tr!("[auto] conexão estável → bitrate aumentado para {cur} Mbps", "[auto] stable connection → bitrate raised to {cur} Mbps"));
             let _ = br_tx.send(cur);
             last_change = Instant::now();
             clean_since = Instant::now();
         }
-        state::host(|h| h.bitrate = cur);
+        if state::host(|h| std::mem::replace(&mut h.bitrate, cur)) != cur {
+            for vw in viewers.lock().unwrap().values() {
+                vw.conn.set_send_window(net::send_window_for(cur));
+            }
+        }
     }
 }
 
@@ -894,7 +922,12 @@ async fn handle_viewer(
     }
 
     let lagged = Arc::new(AtomicU64::new(0));
-    viewers.lock().unwrap().insert(addr, Viewer { conn: conn.clone(), lagged: lagged.clone() });
+    let stalled_ms = Arc::new(AtomicU64::new(0));
+    conn.set_send_window(net::send_window_for(state::host(|h| h.bitrate)));
+    viewers
+        .lock()
+        .unwrap()
+        .insert(addr, Viewer { conn: conn.clone(), lagged: lagged.clone(), stalled_ms: stalled_ms.clone() });
     CONNS.lock().unwrap().insert(addr.to_string(), conn.clone());
     log(crate::tr!("[espectador] + {shown} conectado", "[viewer] + {shown} connected"));
 
@@ -908,12 +941,26 @@ async fn handle_viewer(
             loop {
                 match rx.recv().await {
                     Ok(c) => {
+                        // Este espectador está mais de 1 s atrás do encoder: descarta o que está na fila e
+                        // recomeça no próximo keyframe (mantém a latência baixa; o bitrate automático reage).
+                        if !waiting_keyframe && c.at.elapsed() > Duration::from_secs(1) {
+                            while rx.try_recv().is_ok() {}
+                            lagged.fetch_add(1, Ordering::Relaxed);
+                            waiting_keyframe = true;
+                            continue;
+                        }
+                        let t0 = Instant::now();
                         if waiting_keyframe {
                             let Some(off) = c.vps else { continue };
                             waiting_keyframe = false;
                             s.write_all(&net::frame(&c.raw[off..])).await?;
                         } else {
                             s.write_all(&c.framed).await?;
+                        }
+                        // Escrita demorada = buffer de envio cheio = a rede não está dando conta.
+                        let ms = t0.elapsed().as_millis() as u64;
+                        if ms > 20 {
+                            stalled_ms.fetch_add(ms, Ordering::Relaxed);
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {

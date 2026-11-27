@@ -95,6 +95,10 @@ pub fn mpv_args(mode: &str, title: &str, ipc: Option<&str>) -> Vec<String> {
     if let Some(pipe) = ipc {
         a.push(format!("--input-ipc-server={pipe}"));
     }
+    // Opções extras do mpv (para testes automatizados, ex.: "--vo=null" para rodar sem janela).
+    if let Ok(extra) = std::env::var("GAMESTREAM_MPV_ARGS") {
+        a.extend(extra.split_whitespace().map(String::from));
+    }
     a.push("-".into());
     a
 }

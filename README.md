@@ -26,7 +26,7 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Monitor ou janela específica**: a captura de janela é nativa do Windows e continua funcionando quando a janela é movida, redimensionada ou sobreposta.
 - **Áudio sob controle**: transmita apenas o áudio do jogo ou todo o áudio do sistema **exceto o Discord**, evitando que participantes de uma chamada de voz ouçam o próprio retorno. Microfone opcional. Áudio comprimido com **Opus a 160 kbps** (~0,16 Mbps por espectador), com opção sem compressão.
 - **Vários espectadores ao mesmo tempo**: o vídeo é codificado uma única vez e distribuído a todos.
-- **Bitrate adaptativo**: a qualidade se ajusta automaticamente à conexão dos espectadores, ou pode ser fixada manualmente.
+- **Bitrate adaptativo**: a qualidade se ajusta automaticamente à conexão dos espectadores, ou pode ser fixada manualmente. Uma perda de pacotes pequena e constante (Wi-Fi, rede da operadora) não derruba mais a qualidade: o controle de congestionamento BBR reenvia o que se perde e o bitrate só cai quando a conexão realmente não dá conta.
 - **Código de sala curto** (ex.: `KX7-92B`) e **conexão automática**: o espectador digita o código e o aplicativo libera a conexão pelo firewall do transmissor sozinho, sem configurar o roteador. Também funciona por IPv6, UPnP, código de resposta ou VPN.
 - **Sala de espera**: aprove cada espectador antes de exibir a transmissão e remova quem quiser durante a sessão.
 - **Teste de conexão** opcional, que mede o upload e sugere o bitrate.

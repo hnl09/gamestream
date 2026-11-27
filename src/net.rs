@@ -55,7 +55,17 @@ fn transport() -> Arc<TransportConfig> {
     t.stream_receive_window(VarInt::from_u32(8 * 1024 * 1024));
     t.receive_window(VarInt::from_u32(16 * 1024 * 1024));
     t.send_window(16 * 1024 * 1024);
+    // BBR em vez de Cubic: o Cubic trata qualquer pacote perdido como congestionamento e reduz a taxa,
+    // então uma perda pequena e constante (Wi-Fi, rede da operadora) limitava o envio a poucos Mbps.
+    // O BBR mede a banda e o RTT do caminho e tolera essa perda "de fundo".
+    t.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     Arc::new(t)
+}
+
+/// Buffer de envio por espectador para um bitrate: ~0,5 s de vídeo. Se a conexão não der conta, o
+/// envio trava logo (e o bitrate automático reage) em vez de acumular segundos de atraso no buffer.
+pub fn send_window_for(bitrate_mbps: u32) -> u64 {
+    (bitrate_mbps as u64 * 62_500).max(256 * 1024)
 }
 
 /// Socket UDP dual-stack (IPv6 + IPv4). Se o PC não tiver IPv6, cai para só IPv4.

@@ -91,7 +91,8 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("GameStream")
             .with_inner_size([640.0, 820.0])
-            .with_min_inner_size([520.0, 560.0]),
+            .with_min_inner_size([520.0, 560.0])
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native(
