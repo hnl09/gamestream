@@ -41,8 +41,9 @@ TRANSMITIR
      (GS-..., copiado automaticamente) e envie a senha por um canal separado.
      Com o código da sala, a conexão é liberada automaticamente.
   6. Sala de espera (ativada por padrão): cada espectador aparece no painel
-     "Sala de espera" e só recebe a transmissão depois de aprovado. Durante a
-     transmissão, "Remover" desconecta e bloqueia um espectador.
+     "Sala de espera" e só recebe a transmissão depois de aprovado. Quem você
+     já aprovou entra direto nas próximas transmissões. Durante a
+     transmissão, "Remover" desconecta, bloqueia e esquece a aprovação.
   7. Cada espectador aparece com nome, foto, ping, perda e taxa. Quando
      alguém pede para jogar, clique em "Permitir" (ou ignore). "Revogar
      controle" encerra na hora; teclas pressionadas são soltas.

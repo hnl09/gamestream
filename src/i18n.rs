@@ -341,4 +341,8 @@ const PAIRS: &[(&str, &str)] = &[
     ("o transmissor encerrou a transmissão", "the streamer ended the stream"),
     ("Conexão perdida. Conectando de novo ao transmissor...", "Connection lost. Connecting to the streamer again..."),
     ("Reconectado ao transmissor; aguardando ele aprovar a sua volta (sala de espera)...", "Reconnected to the streamer; waiting for them to approve your return (waiting room)..."),
+    ("Esquecer todos", "Forget all"),
+    ("Todos voltam a passar pela sala de espera", "Everyone goes through the waiting room again"),
+    ("Fica lembrado: nas próximas transmissões, esta pessoa entra direto", "Remembered: in future streams, this person joins directly"),
+    ("Desconecta, bloqueia até o fim da transmissão e esquece a aprovação (volta a passar pela sala de espera)", "Disconnects, blocks until the stream ends and forgets the approval (back to the waiting room)"),
 ];

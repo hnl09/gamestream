@@ -71,6 +71,9 @@ enum Cmd {
         /// Não abrir a janela de pré-visualização
         #[arg(long)]
         no_preview: bool,
+        /// Sala de espera: cada espectador novo precisa ser aprovado ("approve" no terminal)
+        #[arg(long)]
+        approval: bool,
         #[arg(long)]
         password: Option<String>,
         #[arg(long, default_value = "ffmpeg")]
@@ -242,7 +245,7 @@ fn cli() -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, no_preview, password, ffmpeg } => {
+        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, no_preview, approval, password, ffmpeg } => {
             if no_preview {
                 host::set_preview(false);
             }
@@ -267,7 +270,7 @@ fn cli() -> Result<()> {
                 password,
                 upnp: !no_upnp,
                 room: !no_room,
-                approval: false,
+                approval,
                 audio_pcm: pcm,
                 ffmpeg,
             };
@@ -288,6 +291,17 @@ fn cli() -> Result<()> {
                         host::send_chat(t);
                     } else if let Some(r) = code.strip_prefix("react ") {
                         host::send_react(r.trim());
+                    } else if code == "approve" {
+                        // Aprova todos que estão na sala de espera.
+                        let ids: Vec<u64> = state::HOST.lock().unwrap().pending.iter().map(|(id, _)| *id).collect();
+                        for id in ids {
+                            host::decide(id, true);
+                        }
+                    } else if let Some(who) = code.strip_prefix("kick ") {
+                        match host::find_viewer(who) {
+                            Some(k) => host::kick(&k),
+                            None => state::log(crate::tr!("nenhum espectador \"{who}\"", "no viewer \"{who}\"")),
+                        }
                     } else if code == "stop" {
                         host::request_stop();
                     } else if code == "revoke" {
@@ -300,8 +314,7 @@ fn cli() -> Result<()> {
                             "kbm" => control::CTL_KBM,
                             _ => control::CTL_PAD | control::CTL_KBM,
                         };
-                        let key = state::HOST.lock().unwrap().viewers.iter().find(|v| v.name == who || v.ip == who).map(|v| v.key.clone());
-                        match key {
+                        match host::find_viewer(who) {
                             Some(k) => host::set_control(&k, bits),
                             None => state::log(crate::tr!("nenhum espectador \"{who}\"", "no viewer \"{who}\"")),
                         }

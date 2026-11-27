@@ -30,7 +30,11 @@ struct Extra {
     recent: Vec<Recent>,
     /// Últimas escolhas da interface (fonte, áudio, qualidade...). Nunca inclui a senha.
     prefs: serde_json::Value,
+    /// Espectadores já aprovados (hash da chave do espectador, nome): entram direto, sem sala de espera.
+    trusted: Vec<(String, String)>,
 }
+
+const MAX_TRUSTED: usize = 200;
 
 static EXTRA: LazyLock<Mutex<Extra>> = LazyLock::new(|| Mutex::new(Extra::default()));
 const MAX_RECENT: usize = 8;
@@ -103,6 +107,15 @@ fn init() {
         let mut x = EXTRA.lock().unwrap();
         x.nick = crate::control::clean_name(saved["nick"].as_str().unwrap_or(""));
         x.prefs = saved["prefs"].clone();
+        x.trusted = saved["trusted"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| Some((t["k"].as_str()?.to_string(), t["name"].as_str().unwrap_or("").to_string())))
+                    .take(MAX_TRUSTED)
+                    .collect()
+            })
+            .unwrap_or_default();
         x.recent = saved["recent"]
             .as_array()
             .map(|a| {
@@ -122,14 +135,15 @@ fn init() {
 }
 
 fn save() {
-    let (nick, recent, prefs) = {
+    let (nick, recent, prefs, trusted) = {
         let x = EXTRA.lock().unwrap();
+        let trusted: Vec<serde_json::Value> = x.trusted.iter().map(|(k, n)| serde_json::json!({ "k": k, "name": n })).collect();
         let recent: Vec<serde_json::Value> = x
             .recent
             .iter()
             .map(|r| serde_json::json!({ "code": r.code, "name": r.name, "last": r.last }))
             .collect();
-        (x.nick.clone(), recent, x.prefs.clone())
+        (x.nick.clone(), recent, x.prefs.clone(), trusted)
     };
     let v = serde_json::json!({
         "lang": if is_en() { "en" } else { "pt" },
@@ -137,6 +151,7 @@ fn save() {
         "nick": nick,
         "recent": recent,
         "prefs": prefs,
+        "trusted": trusted,
     });
     let p = path();
     if let Some(dir) = p.parent() {
@@ -194,6 +209,45 @@ pub fn set_nick(n: &str) {
         }
         x.nick = n;
     }
+    save();
+}
+
+/// Espectador já aprovado antes (entra direto, sem sala de espera)?
+pub fn is_trusted(hash: &str) -> bool {
+    init();
+    EXTRA.lock().unwrap().trusted.iter().any(|(k, _)| k == hash)
+}
+
+/// Lembra um espectador aprovado (atualiza o nome se já existir).
+pub fn trust(hash: &str, name: &str) {
+    init();
+    {
+        let mut x = EXTRA.lock().unwrap();
+        if x.trusted.iter().any(|(k, n)| k == hash && n == name) {
+            return;
+        }
+        x.trusted.retain(|(k, _)| k != hash);
+        x.trusted.insert(0, (hash.to_string(), name.to_string()));
+        x.trusted.truncate(MAX_TRUSTED);
+    }
+    save();
+}
+
+/// Esquece um espectador (ele volta a passar pela sala de espera).
+pub fn untrust(hash: &str) {
+    init();
+    EXTRA.lock().unwrap().trusted.retain(|(k, _)| k != hash);
+    save();
+}
+
+pub fn trusted_count() -> usize {
+    init();
+    EXTRA.lock().unwrap().trusted.len()
+}
+
+pub fn clear_trusted() {
+    init();
+    EXTRA.lock().unwrap().trusted.clear();
     save();
 }
 

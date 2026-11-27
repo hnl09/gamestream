@@ -749,6 +749,19 @@ impl App {
                 );
             });
             ui.checkbox(&mut self.approval, crate::i18n::t("Sala de espera: aprovar cada espectador antes de exibir a transmissão"));
+            let trusted = crate::settings::trusted_count();
+            if self.approval && trusted > 0 {
+                ui.horizontal(|ui| {
+                    hint(ui, &crate::tr!(
+                        "{} espectador(es) que você já aprovou entram direto.",
+                        "{} viewer(s) you approved before join directly.",
+                        trusted
+                    ));
+                    if ui.small_button(crate::i18n::t("Esquecer todos")).on_hover_text(crate::i18n::t("Todos voltam a passar pela sala de espera")).clicked() {
+                        crate::settings::clear_trusted();
+                    }
+                });
+            }
             ui.checkbox(&mut self.upnp, crate::i18n::t("Abrir porta automaticamente no roteador (UPnP)"));
             egui::CollapsingHeader::new(crate::i18n::t("Avançado")).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -917,6 +930,7 @@ impl App {
                                 }
                                 if ui
                                     .add(egui::Button::new(RichText::new(crate::i18n::t("Aprovar")).strong().color(Color32::WHITE)).fill(pal().ok))
+                                    .on_hover_text(crate::i18n::t("Fica lembrado: nas próximas transmissões, esta pessoa entra direto"))
                                     .clicked()
                                 {
                                     host::decide(*id, true);
@@ -963,7 +977,11 @@ impl App {
                                 });
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button(crate::i18n::t("Remover")).on_hover_text(crate::i18n::t("Desconecta e bloqueia até o fim da transmissão")).clicked() {
+                                if ui
+                                    .small_button(crate::i18n::t("Remover"))
+                                    .on_hover_text(crate::i18n::t("Desconecta, bloqueia até o fim da transmissão e esquece a aprovação (volta a passar pela sala de espera)"))
+                                    .clicked()
+                                {
                                     host::kick(&v.key);
                                 }
                                 if v.granted != 0 {

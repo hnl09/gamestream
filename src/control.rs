@@ -136,6 +136,24 @@ pub fn decode_mouse(b: &[u8]) -> Option<(i32, i32)> {
     Some((i16::from_le_bytes([b[1], b[2]]) as i32, i16::from_le_bytes([b[3], b[4]]) as i32))
 }
 
+/// Chave que identifica este PC para um transmissor (para ele lembrar que já aprovou você).
+/// Derivada de um segredo local e da identidade do transmissor: cada transmissor recebe uma chave
+/// diferente, então um não consegue usar a sua chave para se passar por você com outro.
+pub fn viewer_key(host_fp: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"gamestream-viewer-key\0");
+    h.update(crate::room::load_secret().as_bytes());
+    h.update(host_fp);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// O que o transmissor guarda: só o hash da chave (nunca a chave em si).
+pub fn key_hash(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(key.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Descrição das permissões ("controle", "teclado e mouse", ...).
 pub fn ctl_desc(bits: u8) -> String {
     match (bits & CTL_PAD != 0, bits & CTL_KBM != 0) {

@@ -614,6 +614,7 @@ async fn connect(
                 "token": token,
                 "v": env!("CARGO_PKG_VERSION"),
                 "p": crate::control::PROTOCOL,
+                "vk": inv.fingerprint.map(|fp| crate::control::viewer_key(&fp)),
                 "avatar": crate::avatar::load().map(|a| crate::avatar::to_b64(&a)),
             });
             match crate::control::send(&mut send, &hello).await {

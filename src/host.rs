@@ -91,6 +91,8 @@ fn avatar_msg(id: &str, png: &[u8]) -> serde_json::Value {
 
 struct RemoteSlot {
     id: String,
+    /// Hash da chave do espectador (para esquecê-lo ao remover).
+    trust: Option<String>,
     name: String,
     token: String,
     granted: Arc<AtomicU8>,
@@ -138,6 +140,19 @@ pub fn set_control(key: &str, bits: u8) {
     }
 }
 
+/// Chave de um espectador conectado pelo nome ou pelo IP (comandos do terminal).
+pub fn find_viewer(who: &str) -> Option<String> {
+    let who = who.trim();
+    REMOTE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(key, slot)| {
+            slot.name == who || key.parse::<SocketAddr>().is_ok_and(|a| a.ip().to_canonical().to_string() == who)
+        })
+        .map(|(key, _)| key.clone())
+}
+
 /// Revoga o controle remoto de todos os espectadores.
 pub fn revoke_all_control() {
     let keys: Vec<String> = REMOTE.lock().unwrap().iter().filter(|(_, s)| s.granted.load(Ordering::Relaxed) != 0).map(|(k, _)| k.clone()).collect();
@@ -158,6 +173,10 @@ pub fn kick(key: &str) {
     if let Some(slot) = REMOTE.lock().unwrap().get(key) {
         slot.granted.store(0, Ordering::Relaxed);
         TOKENS.lock().unwrap().remove(&slot.token);
+        // Removido: deixa de entrar direto nas próximas transmissões.
+        if let Some(h) = &slot.trust {
+            crate::settings::untrust(h);
+        }
     }
     if let Some(conn) = CONNS.lock().unwrap().remove(key) {
         BANNED.lock().unwrap().insert(conn.remote_address().ip().to_canonical());
@@ -1141,6 +1160,7 @@ async fn handle_viewer(
     let mut avatar: Option<Arc<Vec<u8>>> = None;
     let mut version = String::new();
     let mut proto = 0u64;
+    let mut trust_hash: Option<String> = None;
     if let Ok(Ok((send, recv))) = tokio::time::timeout(Duration::from_secs(3), conn.accept_bi()).await {
         let mut lines = BufReader::new(recv).lines();
         if let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_secs(3), lines.next_line()).await {
@@ -1153,6 +1173,7 @@ async fn handle_viewer(
                 avatar = v["avatar"].as_str().and_then(crate::avatar::from_b64);
                 version = v["v"].as_str().unwrap_or("").chars().take(16).collect();
                 proto = v["p"].as_u64().unwrap_or(1);
+                trust_hash = v["vk"].as_str().filter(|k| (32..=128).contains(&k.len())).map(control::key_hash);
             }
         }
         ctl = Some((send, lines));
@@ -1175,8 +1196,14 @@ async fn handle_viewer(
         _ => new_token(),
     };
 
+    // Já aprovado numa transmissão anterior: entra direto.
+    let trusted = trust_hash.as_deref().is_some_and(crate::settings::is_trusted);
+    if approval && returning.is_none() && trusted {
+        log(crate::tr!("[espectador] {who} entrou direto (já aprovado antes)", "[viewer] {who} joined directly (approved before)"));
+    }
+
     // Sala de espera: aguarda o transmissor aprovar (até 2 minutos).
-    if approval && returning.is_none() {
+    if approval && returning.is_none() && !trusted {
         let id = NEXT_PENDING.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         DECISIONS.lock().unwrap().insert(id, tx);
@@ -1192,6 +1219,12 @@ async fn handle_viewer(
             log(crate::tr!("[espectador] {who} não aprovado", "[viewer] {who} not approved"));
             conn.close(3u32.into(), b"entrada recusada pelo transmissor");
             return Ok(());
+        }
+    }
+    // Aprovado (agora ou antes): lembra para as próximas transmissões (atualiza o nome).
+    if approval {
+        if let Some(h) = &trust_hash {
+            crate::settings::trust(h, &name);
         }
     }
     let granted_bits = returning.unwrap_or(0);
@@ -1233,7 +1266,7 @@ async fn handle_viewer(
     CONNS.lock().unwrap().insert(addr.to_string(), conn.clone());
     REMOTE.lock().unwrap().insert(
         addr.to_string(),
-        RemoteSlot { id: member_id.clone(), name: name.clone(), token: token.clone(), granted: granted.clone(), notify: perm_tx.clone() },
+        RemoteSlot { id: member_id.clone(), trust: trust_hash.clone(), name: name.clone(), token: token.clone(), granted: granted.clone(), notify: perm_tx.clone() },
     );
     if returning.is_some() {
         log(crate::tr!("[espectador] + {who} reconectado", "[viewer] + {who} reconnected"));
