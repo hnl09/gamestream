@@ -393,6 +393,8 @@ struct App {
     my_avatar: Option<Arc<Vec<u8>>>,
     want_pad: bool,
     want_kbm: bool,
+    /// Fotos das salas recentes (código -> PNG), recarregadas de tempos em tempos.
+    recent_avatars: (std::time::Instant, HashMap<String, Arc<Vec<u8>>>),
 }
 
 impl App {
@@ -444,6 +446,7 @@ impl App {
             my_avatar: crate::avatar::load(),
             want_pad: true,
             want_kbm: true,
+            recent_avatars: (std::time::Instant::now() - Duration::from_secs(60), HashMap::new()),
         };
         a.refresh();
         crate::updater::check_in_background();
@@ -1014,17 +1017,23 @@ impl App {
         if !running {
             let recent = crate::settings::recent();
             if !recent.is_empty() {
+                if self.recent_avatars.0.elapsed() > Duration::from_secs(5) {
+                    self.recent_avatars =
+                        (std::time::Instant::now(), recent.iter().filter_map(|r| Some((r.code.clone(), crate::settings::recent_avatar(&r.code)?))).collect());
+                }
                 let mut connect_to: Option<String> = None;
+                let (avatars, recent_av) = (&mut self.avatars, &self.recent_avatars.1);
                 card(ui, crate::i18n::t("Salas recentes"), |ui| {
                     for r in &recent {
                         ui.horizontal(|ui| {
-                            avatar_circle(ui, None, &r.name, 26.0);
+                            let tex = avatars.get(ui.ctx(), &format!("r:{}", r.code), recent_av.get(&r.code));
+                            avatar_circle(ui, tex.as_ref(), &r.name, 32.0);
                             ui.vertical(|ui| {
                                 ui.label(RichText::new(if r.name.is_empty() { crate::room::display(&r.code) } else { r.name.clone() }).strong());
                                 ui.label(RichText::new(format!("{}  ·  {}", crate::room::display(&r.code), ago(r.last))).small().color(pal().muted));
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button("✕").on_hover_text(crate::i18n::t("Remover da lista")).clicked() {
+                                if ui.small_button("🗑").on_hover_text(crate::i18n::t("Remover da lista")).clicked() {
                                     crate::settings::remove_recent(&r.code);
                                 }
                                 if ui
@@ -1613,7 +1622,9 @@ impl eframe::App for App {
                                 ui.label(RichText::new(format!("v{}", crate::updater::VERSION)).small().color(pal().muted));
                             }
                         }
-                        if host_live {
+                        if ui.available_width() < 130.0 {
+                            // Sem espaço (janela estreita): o status já aparece dentro de cada aba.
+                        } else if host_live {
                             pill(ui, crate::i18n::t("AO VIVO"), pal().live);
                         } else if view_live {
                             if state::VIEW.lock().unwrap().phase == ViewPhase::Connected {

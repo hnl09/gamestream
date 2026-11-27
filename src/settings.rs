@@ -217,4 +217,27 @@ pub fn remove_recent(code: &str) {
     init();
     EXTRA.lock().unwrap().recent.retain(|r| r.code != code);
     save();
+    let _ = std::fs::remove_file(recent_avatar_path(code));
+}
+
+fn recent_avatar_path(code: &str) -> PathBuf {
+    let safe: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    path().with_file_name("recent").join(format!("{safe}.png"))
+}
+
+/// Guarda a foto do transmissor de uma sala recente (para mostrar na lista).
+pub fn save_recent_avatar(code: &str, png: &[u8]) {
+    let p = recent_avatar_path(code);
+    if std::fs::read(&p).ok().as_deref() == Some(png) {
+        return;
+    }
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, png);
+}
+
+pub fn recent_avatar(code: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    let png = std::fs::read(recent_avatar_path(code)).ok()?;
+    crate::avatar::valid(&png).then(|| std::sync::Arc::new(png))
 }

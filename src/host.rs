@@ -722,7 +722,7 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
             if last_change.elapsed() >= Duration::from_secs(4) && cur > MIN_BITRATE {
                 trouble_at = Some(cur);
                 cur = (cur * 7 / 10).max(MIN_BITRATE);
-                log(crate::tr!("[auto] {why} → bitrate reduzido para {cur} Mbps", "[auto] {why} → bitrate lowered to {cur} Mbps"));
+                log(crate::tr!("[auto] {why}: bitrate reduzido para {cur} Mbps", "[auto] {why}: bitrate lowered to {cur} Mbps"));
                 let _ = br_tx.send(cur);
                 last_change = Instant::now();
             }
@@ -736,7 +736,7 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
             if trouble_at.is_some_and(|t| cur >= t) {
                 trouble_at = None; // passou do ponto antigo sem problemas: a conexão melhorou
             }
-            log(crate::tr!("[auto] conexão estável → bitrate aumentado para {cur} Mbps", "[auto] stable connection → bitrate raised to {cur} Mbps"));
+            log(crate::tr!("[auto] conexão estável: bitrate aumentado para {cur} Mbps", "[auto] stable connection: bitrate raised to {cur} Mbps"));
             let _ = br_tx.send(cur);
             last_change = Instant::now();
             clean_since = Instant::now();

@@ -841,6 +841,9 @@ async fn run_session(
                                 "avatar" => {
                                     let id: String = v["id"].as_str().unwrap_or("").chars().take(16).collect();
                                     if let Some(png) = v["png"].as_str().and_then(crate::avatar::from_b64) {
+                                        if let (true, Some(code)) = (id == "h", &room_code) {
+                                            crate::settings::save_recent_avatar(code, &png);
+                                        }
                                         let cmd = state::view(|s| {
                                             if s.avatars.len() < 64 {
                                                 s.avatars.insert(id, png);
