@@ -33,6 +33,12 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Troca de monitor ou janela durante a transmissão**, sem desconectar os espectadores, e recuperação automática quando um jogo muda o modo de tela (se a captura do monitor falhar seguidamente, o aplicativo alterna sozinho para a Windows Graphics Capture).
 - **Segurança**: criptografia TLS 1.3, verificação da identidade do transmissor pelo convite (proteção contra interceptação), senha e código de segurança.
 - **Controles na janela de vídeo**: volume, zoom a partir do cursor, tela cheia e estatísticas em tempo real (ping, FPS, perda de pacotes e taxa recebida).
+- **Chat e reações em cima do vídeo**: todos os conectados veem as mensagens e as reações (👍 😂 🔥 ❤ 😮 GG) na hora, na janela do vídeo e no aplicativo. Enter escreve no chat; as teclas 1 a 6 enviam reações.
+- **Quem está na sala**: avatares de todos os conectados no canto do vídeo, como no Discord (passe o mouse para ver o nome). Cada pessoa escolhe um **nome** (até 24 caracteres, com emojis) e uma **foto** (PNG, JPG, WebP ou GIF de até 8 MB, reduzida para 128×128). A foto fica no seu PC e vai direto para quem está na sala, sem servidor.
+- **Jogar junto (controle remoto, opcional)**: o espectador pede para jogar com o controle ou com teclado e mouse, e o transmissor permite ou revoga a qualquer momento. O controle vira um controle de Xbox 360 virtual no PC do transmissor (requer o driver [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)); teclado e mouse funcionam sem instalar nada (F8 liga e desliga na janela do vídeo).
+- **Reconexão automática**: se a conexão cair, o espectador volta sozinho em alguns segundos, na mesma janela de vídeo e sem passar de novo pela sala de espera.
+- **Salas recentes**: as salas em que você entrou ficam na aba Assistir para reconectar com um clique.
+- **Painel por espectador**: ping, perda de pacotes e taxa de cada espectador, além dos pedidos de controle.
 - **Pré-visualização local** da transmissão, sem áudio.
 - **Atualização automática** com verificação de integridade.
 - **Português e inglês**, com três temas visuais (Padrão, Agente e Bioameaça), selecionáveis no menu ⚙.
@@ -122,6 +128,8 @@ Na primeira execução, permita o acesso do GameStream à rede quando o Firewall
 - **Sem conta e sem coleta de dados**: a transmissão ocorre diretamente entre os computadores. Além dessa conexão, o aplicativo acessa apenas o GitHub (atualizações e download do FFmpeg), o seu roteador (UPnP, se ativado) e o **servidor de encontro** (Cloudflare Worker, código em [`worker/`](worker/)).
 - **Servidor de encontro**: recebe somente os endereços de rede necessários para conectar transmissor e espectador; vídeo, áudio e senha nunca passam por ele, e nada é registrado. O código da sala é derivado da identidade do transmissor, e o aplicativo do espectador confere essa correspondência, de modo que nem o servidor consegue redirecionar a conexão para outro computador.
 - **Sala de espera**: com ela ativada, ninguém recebe a transmissão sem a sua aprovação, mesmo conhecendo o código e a senha.
+- **Chat, nome e foto**: trafegam pela mesma conexão criptografada, diretamente entre os computadores; nada passa pelo servidor de encontro. Fotos recebidas são validadas (PNG de até 96 KB e 256×256) antes de serem exibidas.
+- **Controle remoto**: desligado por padrão. Só funciona depois que o transmissor permite, apenas para o que foi pedido (controle e/ou teclado e mouse), e pode ser revogado a qualquer momento. As teclas Windows nunca são repassadas. Teclas e botões pressionados são soltos automaticamente quando o controle é revogado ou a conexão cai. Do lado do espectador, teclado e mouse só são enviados enquanto o modo de controle está ligado (F8) e a janela do vídeo está em primeiro plano.
 - **Endereço IP**: como em qualquer conexão direta, os espectadores conseguem ver o endereço IP do transmissor. Para não expô-lo, utilize uma VPN.
 - A identidade do transmissor é um certificado gerado localmente e armazenado em `%APPDATA%\GameStream`.
 
@@ -172,6 +180,9 @@ gamestream sources                                        # monitores, janelas e
 gamestream host --auto --bitrate 25 --password SENHA      # transmite o monitor principal
 gamestream host --window "Nome da janela" --audio game    # transmite uma janela com o áudio dela
 gamestream view GS-xxxx --password SENHA                  # conecta a uma transmissão
+#   durante a transmissão (digitando no terminal):
+#   transmissor: chat <texto> · react 🔥 · allow <nome> pad|kbm|both · revoke · monitor 2 · window <título>
+#   espectador:  chat <texto> · react 🔥 · control pad|kbm|both|off
 gamestream audio-test --audio no-discord                  # mede o áudio capturado
 gamestream update                                         # atualiza para a versão mais recente
 ```

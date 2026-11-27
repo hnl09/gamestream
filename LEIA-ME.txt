@@ -43,6 +43,9 @@ TRANSMITIR
   6. Sala de espera (ativada por padrão): cada espectador aparece no painel
      "Sala de espera" e só recebe a transmissão depois de aprovado. Durante a
      transmissão, "Remover" desconecta e bloqueia um espectador.
+  7. Cada espectador aparece com nome, foto, ping, perda e taxa. Quando
+     alguém pede para jogar, clique em "Permitir" (ou ignore). "Revogar
+     controle" encerra na hora; teclas pressionadas são soltas.
   Opcional: "Testar conexão" (em Qualidade) mede o upload e sugere o bitrate.
   Durante a transmissão, "Trocar fonte" muda o monitor ou a janela sem
   desconectar os espectadores. Se um jogo mudar o modo de tela (tela cheia
@@ -69,6 +72,22 @@ ASSISTIR
        - Estatísticas (ping, FPS, perda de pacotes e taxa recebida) são
          exibidas acima do painel. A tecla I (ou o botão "i") as fixa no
          canto da tela.
+       - Enter: escrever no chat. Teclas 1 a 6: reações (👍 😂 🔥 ❤ 😮 GG).
+         Mensagens e reações aparecem para todos, em cima do vídeo.
+       - Canto superior esquerdo: avatares de quem está na sala (passe o
+         mouse para ver o nome). Anel vermelho = transmissor; verde = jogando.
+  4. Seu perfil (nome e foto): clique no seu nome no topo do aplicativo.
+     Nome com até 24 caracteres (emojis permitidos); foto PNG, JPG, WebP ou
+     GIF de até 8 MB. A foto fica no seu PC e vai direto para a sala.
+  5. Jogar junto (opcional): no card "Jogar junto", marque controle e/ou
+     teclado e mouse e clique em "Pedir para jogar". O transmissor precisa
+     clicar em "Permitir". Teclado e mouse: clique na janela do vídeo e
+     aperte F8 para começar e F8 de novo para soltar. Controle: requer o
+     driver ViGEmBus instalado no PC do transmissor
+     (github.com/nefarius/ViGEmBus/releases).
+  6. Se a conexão cair, o aplicativo reconecta sozinho (até 3 minutos) na
+     mesma janela de vídeo. As salas em que você entrou ficam em "Salas
+     recentes" para entrar de novo com um clique.
      "Áudio recebido" (na aba Assistir) mostra se o som está chegando. Se
      houver nível mas nada for ouvido, confira a "Saída de áudio" escolhida
      antes de conectar e o volume no painel do vídeo.

@@ -2,12 +2,15 @@
 #![windows_subsystem = "windows"]
 
 mod audio;
+mod avatar;
+mod control;
 mod gui;
 mod host;
 mod i18n;
 mod invite;
 mod net;
 mod procaudio;
+mod remote;
 mod room;
 mod settings;
 mod sources;
@@ -281,6 +284,25 @@ fn cli() -> Result<()> {
                     } else if let Some(n) = code.strip_prefix("monitor ").and_then(|n| n.trim().parse::<u32>().ok()) {
                         // Troca de fonte durante a transmissão: "monitor 2" ou "window <parte do título>".
                         let _ = host::switch_source(sources::Source::Monitor(n.saturating_sub(1)));
+                    } else if let Some(t) = code.strip_prefix("chat ") {
+                        host::send_chat(t);
+                    } else if let Some(r) = code.strip_prefix("react ") {
+                        host::send_react(r.trim());
+                    } else if code == "revoke" {
+                        host::revoke_all_control();
+                    } else if let Some(rest) = code.strip_prefix("allow ") {
+                        // "allow <nome ou IP> <pad|kbm|both>": libera o controle remoto de um espectador.
+                        let (who, what) = rest.trim().rsplit_once(' ').unwrap_or((rest.trim(), "both"));
+                        let bits = match what {
+                            "pad" => control::CTL_PAD,
+                            "kbm" => control::CTL_KBM,
+                            _ => control::CTL_PAD | control::CTL_KBM,
+                        };
+                        let key = state::HOST.lock().unwrap().viewers.iter().find(|v| v.name == who || v.ip == who).map(|v| v.key.clone());
+                        match key {
+                            Some(k) => host::set_control(&k, bits),
+                            None => state::log(crate::tr!("nenhum espectador \"{who}\"", "no viewer \"{who}\"")),
+                        }
                     } else if let Some(t) = code.strip_prefix("window ") {
                         match sources::find_window(t.trim()) {
                             Some(w) => {
@@ -300,6 +322,27 @@ fn cli() -> Result<()> {
         }
         Cmd::View { invite, password, mpv, audio_out } => {
             let opts = viewer::ViewOpts { invite, password, mpv, audio_device: audio_out };
+            // Terminal: "chat <texto>", "react <reação>", "control pad|kbm|both|off".
+            std::thread::spawn(|| {
+                let mut line = String::new();
+                while std::io::stdin().read_line(&mut line).is_ok_and(|n| n > 0) {
+                    let cmd = line.trim().trim_start_matches('\u{feff}');
+                    if let Some(t) = cmd.strip_prefix("chat ") {
+                        viewer::send_chat(t);
+                    } else if let Some(r) = cmd.strip_prefix("react ") {
+                        viewer::send_react(r.trim());
+                    } else if let Some(c) = cmd.strip_prefix("control ") {
+                        let (pad, kbm) = match c.trim() {
+                            "pad" => (true, false),
+                            "kbm" => (false, true),
+                            "off" => (false, false),
+                            _ => (true, true),
+                        };
+                        viewer::request_control(pad, kbm);
+                    }
+                    line.clear();
+                }
+            });
             if rt.block_on(viewer::run(opts, ctrl_c)).is_err() {
                 std::process::exit(1);
             }

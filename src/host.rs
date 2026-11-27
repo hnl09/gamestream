@@ -8,7 +8,7 @@ use std::{
     net::SocketAddr,
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -23,7 +23,9 @@ use tokio::{
 };
 
 use crate::{
-    audio, invite, net,
+    audio,
+    control::{self, ChatMsg, CTL_KBM, CTL_PAD},
+    invite, net, remote,
     sources::{self, Capture, Source},
     state::{self, log},
 };
@@ -44,6 +46,98 @@ static CONNS: std::sync::LazyLock<Mutex<HashMap<String, quinn::Connection>>> =
 static BANNED: std::sync::LazyLock<Mutex<std::collections::HashSet<std::net::IpAddr>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
+/// Chat da transmissão atual (mensagens do transmissor e de todos os espectadores).
+static CHAT: std::sync::LazyLock<Mutex<Option<broadcast::Sender<ChatMsg>>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+/// Tokens de reconexão (quem já foi aprovado volta sem passar pela sala de espera) → controle liberado.
+static TOKENS: std::sync::LazyLock<Mutex<HashMap<String, u8>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Controle remoto de cada espectador conectado (chave = endereço).
+static REMOTE: std::sync::LazyLock<Mutex<HashMap<String, RemoteSlot>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Quem está na transmissão (transmissor + espectadores aprovados), com avatar. Toda mudança vai
+/// para todos pelo canal ROSTER.
+struct MemberEntry {
+    m: state::Member,
+    avatar: Option<Arc<Vec<u8>>>,
+}
+static MEMBERS: std::sync::LazyLock<Mutex<Vec<MemberEntry>>> = std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+static ROSTER: std::sync::LazyLock<Mutex<Option<broadcast::Sender<serde_json::Value>>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+static NEXT_MEMBER: AtomicU64 = AtomicU64::new(1);
+
+fn roster_json() -> serde_json::Value {
+    let list: Vec<serde_json::Value> = MEMBERS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| serde_json::json!({ "id": e.m.id, "name": e.m.name, "host": e.m.host, "ctl": e.m.ctl }))
+        .collect();
+    serde_json::json!({ "t": "roster", "list": list })
+}
+
+/// Quem está na sala e os avatares (para a coluna de avatares da prévia).
+fn members_snapshot() -> (Vec<state::Member>, HashMap<String, Arc<Vec<u8>>>) {
+    let m = MEMBERS.lock().unwrap();
+    (m.iter().map(|e| e.m.clone()).collect(), m.iter().filter_map(|e| Some((e.m.id.clone(), e.avatar.clone()?))).collect())
+}
+
+fn publish_roster() {
+    if let Some(tx) = ROSTER.lock().unwrap().as_ref() {
+        let _ = tx.send(roster_json());
+    }
+}
+
+fn avatar_msg(id: &str, png: &[u8]) -> serde_json::Value {
+    serde_json::json!({ "t": "avatar", "id": id, "png": crate::avatar::to_b64(png) })
+}
+
+struct RemoteSlot {
+    id: String,
+    name: String,
+    token: String,
+    granted: Arc<AtomicU8>,
+    /// Avisa a tarefa do espectador que a permissão mudou (com um aviso opcional para ele).
+    notify: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+}
+
+/// Envia uma mensagem no chat como transmissor.
+pub fn send_chat(text: &str) {
+    if let (Some(tx), Some(text)) = (CHAT.lock().unwrap().as_ref(), control::clean_text(text)) {
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text, react: false });
+    }
+}
+
+/// Envia uma reação como transmissor.
+pub fn send_react(r: &str) {
+    if let (Some(tx), Some(r)) = (CHAT.lock().unwrap().as_ref(), control::clean_react(r)) {
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: r, react: true });
+    }
+}
+
+/// Libera (ou revoga, com 0) o controle remoto de um espectador. `bits` = CTL_PAD | CTL_KBM.
+pub fn set_control(key: &str, bits: u8) {
+    let remote = REMOTE.lock().unwrap();
+    let Some(slot) = remote.get(key) else { return };
+    slot.granted.store(bits, Ordering::Relaxed);
+    TOKENS.lock().unwrap().insert(slot.token.clone(), bits);
+    let _ = slot.notify.send(None);
+    if let Some(e) = MEMBERS.lock().unwrap().iter_mut().find(|e| e.m.id == slot.id) {
+        e.m.ctl = bits;
+    }
+    publish_roster();
+    if bits == 0 {
+        log(crate::tr!("[controle] controle de {} revogado", "[control] {}'s control revoked", slot.name));
+    } else {
+        log(crate::tr!("[controle] {} pode jogar com: {}", "[control] {} may play with: {}", slot.name, control::ctl_desc(bits)));
+    }
+}
+
+/// Revoga o controle remoto de todos os espectadores.
+pub fn revoke_all_control() {
+    let keys: Vec<String> = REMOTE.lock().unwrap().iter().filter(|(_, s)| s.granted.load(Ordering::Relaxed) != 0).map(|(k, _)| k.clone()).collect();
+    for k in keys {
+        set_control(&k, 0);
+    }
+}
+
 /// Aprova (true) ou recusa (false) um espectador na sala de espera.
 pub fn decide(id: u64, approve: bool) {
     if let Some(tx) = DECISIONS.lock().unwrap().remove(&id) {
@@ -53,6 +147,10 @@ pub fn decide(id: u64, approve: bool) {
 
 /// Remove um espectador conectado e bloqueia o endereço dele até o fim da transmissão.
 pub fn kick(key: &str) {
+    if let Some(slot) = REMOTE.lock().unwrap().get(key) {
+        slot.granted.store(0, Ordering::Relaxed);
+        TOKENS.lock().unwrap().remove(&slot.token);
+    }
     if let Some(conn) = CONNS.lock().unwrap().remove(key) {
         BANNED.lock().unwrap().insert(conn.remote_address().ip().to_canonical());
         conn.close(2u32.into(), b"removido pelo transmissor");
@@ -101,8 +199,9 @@ async fn preview_loop(vtx: broadcast::Sender<VideoChunk>) {
 /// Exibe o vídeo que sai do encoder (o mesmo recebido pelos espectadores) num mpv local, sem áudio.
 async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
     let mpv = crate::viewer::find_mpv(None);
+    let pipe = format!(r"\\.\pipe\gamestream-preview-{}", std::process::id());
     let mut child = Command::new(&mpv)
-        .args(crate::viewer::mpv_args("preview", crate::i18n::t("GameStream - Pré-visualização (sem áudio)"), None))
+        .args(crate::viewer::mpv_args("preview", crate::i18n::t("GameStream - Pré-visualização (sem áudio)"), Some(&pipe)))
         .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -110,6 +209,45 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
     let mut stdin = child.stdin.take().unwrap();
     let mut rx = vtx.subscribe();
     let mut waiting_keyframe = true;
+    // Chat na janela de prévia: mostra as mensagens e permite responder (Enter) e reagir (1 a 6).
+    let roster_rx = ROSTER.lock().unwrap().as_ref().map(|tx| tx.subscribe());
+    let bridge = CHAT.lock().unwrap().as_ref().map(|tx| tx.subscribe()).map(|chat_rx| {
+        let (osd_tx, osd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut roster_rx = roster_rx;
+        let send_members = {
+            let osd_tx = osd_tx.clone();
+            move || {
+                let (list, avatars) = members_snapshot();
+                let _ = osd_tx.send(crate::viewer::members_osd_cmd(&list, &avatars));
+            }
+        };
+        send_members();
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<crate::viewer::OverlayEv>();
+        let pipe = pipe.clone();
+        tokio::spawn(async move {
+            let ipc = tokio::spawn(crate::viewer::overlay_bridge(pipe, osd_rx, ev_tx));
+            let mut chat_rx = chat_rx;
+            loop {
+                tokio::select! {
+                    m = chat_rx.recv() => match m {
+                        Ok(m) => { let _ = osd_tx.send(crate::viewer::osd_chat_cmd(&m)); }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                    r = async { match roster_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => match r {
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => send_members(),
+                        Err(broadcast::error::RecvError::Closed) => roster_rx = None,
+                    },
+                    e = ev_rx.recv() => match e {
+                        Some(crate::viewer::OverlayEv::Chat(t)) => send_chat(&t),
+                        Some(crate::viewer::OverlayEv::React(r)) => send_react(&r),
+                        None => break,
+                    },
+                }
+            }
+            ipc.abort();
+        })
+    });
     state::host(|h| h.preview_open = true);
     log(crate::i18n::t("[pré-visualização] aberta (sem áudio)."));
     loop {
@@ -137,6 +275,9 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
             }
             _ = async { while preview_wanted() { tokio::time::sleep(Duration::from_millis(200)).await; } } => break,
         }
+    }
+    if let Some(b) = bridge {
+        b.abort();
     }
     log(crate::i18n::t("[pré-visualização] fechada."));
     Ok(())
@@ -200,6 +341,11 @@ struct Viewer {
     lagged: Arc<AtomicU64>,
     /// Tempo (ms) em que o envio de vídeo ficou travado esperando a rede (buffer de envio cheio).
     stalled_ms: Arc<AtomicU64>,
+    name: String,
+    id: String,
+    /// Controle remoto pedido / liberado (bits CTL_PAD | CTL_KBM).
+    wants: Arc<AtomicU8>,
+    granted: Arc<AtomicU8>,
 }
 
 type Viewers = Arc<Mutex<HashMap<SocketAddr, Viewer>>>;
@@ -760,6 +906,35 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let bytes_out = Arc::new(AtomicU64::new(0));
     let (br_tx, br_rx) = watch::channel(start_br);
 
+    let (chat_tx, _) = broadcast::channel::<ChatMsg>(256);
+    *CHAT.lock().unwrap() = Some(chat_tx.clone());
+    let (roster_tx, _) = broadcast::channel::<serde_json::Value>(64);
+    *ROSTER.lock().unwrap() = Some(roster_tx);
+    let my_avatar = crate::avatar::load();
+    *MEMBERS.lock().unwrap() = vec![MemberEntry {
+        m: state::Member { id: "h".into(), name: crate::settings::nick(), host: true, ctl: 0 },
+        avatar: my_avatar.clone(),
+    }];
+    state::host(|h| {
+        h.avatars.clear();
+        if let Some(a) = &my_avatar {
+            h.avatars.insert("h".into(), a.clone());
+        }
+    });
+    // Guarda o chat para a interface do transmissor.
+    let chat_log = {
+        let mut rx = chat_tx.subscribe();
+        async move {
+            loop {
+                match rx.recv().await {
+                    Ok(m) => state::host(|h| state::push_chat(&mut h.chat, m)),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+                }
+            }
+        }
+    };
+
     let (cap_tx, cap_rx) = watch::channel(cap.clone());
     let current_source = Mutex::new(o.source.clone());
     let tracker = track_window(&current_source, &cap_tx);
@@ -798,8 +973,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         async move {
             while let Some(inc) = ep.accept().await {
                 let (vtx, atx, viewers, password) = (vtx.clone(), atx.clone(), viewers.clone(), password.clone());
+                let chat_tx = chat_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_viewer(inc, vtx, atx, audio_fmt, opus, approval, password, viewers).await {
+                    if let Err(e) = handle_viewer(inc, vtx, atx, chat_tx, audio_fmt, opus, approval, password, viewers).await {
                         log(crate::tr!("[espectador] {e:#}", "[viewer] {e:#}"));
                     }
                 });
@@ -809,15 +985,39 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     let stats = async {
         let mut last = 0u64;
+        // Por espectador: (bytes enviados, pacotes perdidos, pacotes enviados) na medição anterior.
+        let mut prev: HashMap<SocketAddr, (u64, u64, u64)> = HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let now = bytes_out.load(Ordering::Relaxed);
             let mbps = (now - last) as f64 * 8.0 / 2.0 / 1e6;
             last = now;
-            let list: Vec<(String, String)> = viewers.lock().unwrap().iter().map(|(a, v)| {
-                let rtt = v.conn.stats().path.rtt.as_millis();
-                (a.to_string(), format!("{}  (ping {rtt} ms)", a.ip().to_canonical()))
-            }).collect();
+            let list: Vec<state::ViewerRow> = {
+                let v = viewers.lock().unwrap();
+                prev.retain(|a, _| v.contains_key(a));
+                let mut rows: Vec<state::ViewerRow> = v
+                    .iter()
+                    .map(|(a, vw)| {
+                        let s = vw.conn.stats();
+                        let cur = (s.udp_tx.bytes, s.path.lost_packets, s.path.sent_packets);
+                        let p = prev.insert(*a, cur).unwrap_or(cur);
+                        let sent = cur.2 - p.2;
+                        state::ViewerRow {
+                            key: a.to_string(),
+                            id: vw.id.clone(),
+                            name: vw.name.clone(),
+                            ip: a.ip().to_canonical().to_string(),
+                            ping_ms: s.path.rtt.as_millis() as u32,
+                            loss: if sent > 0 { (cur.1 - p.1) as f64 * 100.0 / sent as f64 } else { 0.0 },
+                            mbps: (cur.0 - p.0) as f64 * 8.0 / 2.0 / 1e6,
+                            wants: vw.wants.load(Ordering::Relaxed),
+                            granted: vw.granted.load(Ordering::Relaxed),
+                        }
+                    })
+                    .collect();
+                rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                rows
+            };
             state::host(|h| {
                 h.mbps = mbps;
                 h.viewers = list;
@@ -854,6 +1054,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = tracker => Ok(()),
         _ = accept => Ok(()),
         _ = stats => Ok(()),
+        _ = chat_log => Ok(()),
         _ = controller => Ok(()),
         _ = renew => Ok(()),
         _ = stop => Ok(()),
@@ -863,6 +1064,12 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     DECISIONS.lock().unwrap().clear();
     CONNS.lock().unwrap().clear();
     BANNED.lock().unwrap().clear();
+    *CHAT.lock().unwrap() = None;
+    *ROSTER.lock().unwrap() = None;
+    MEMBERS.lock().unwrap().clear();
+    TOKENS.lock().unwrap().clear();
+    REMOTE.lock().unwrap().clear();
+    crate::viewer::cleanup_osd_avatars();
     ep.close(0u32.into(), b"transmissao encerrada pelo host");
     if let Some(m) = &mapping {
         m.remove().await;
@@ -870,10 +1077,25 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     res
 }
 
+/// Token aleatório para reconexão (identifica um espectador já aprovado nesta transmissão).
+fn new_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::new();
+    for i in 0..2u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(i);
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_viewer(
     inc: quinn::Incoming,
     vtx: broadcast::Sender<VideoChunk>,
     atx: broadcast::Sender<Bytes>,
+    chat_tx: broadcast::Sender<ChatMsg>,
     audio_fmt: Option<(u32, u16)>,
     opus: bool,
     approval: bool,
@@ -901,13 +1123,44 @@ async fn handle_viewer(
         }
     }
 
+    // Canal de controle (nome, chat, controle remoto). Espectadores de versões antigas não o abrem.
+    let mut ctl: Option<(quinn::SendStream, tokio::io::Lines<BufReader<quinn::RecvStream>>)> = None;
+    let mut name = shown.to_string();
+    let mut token_in: Option<String> = None;
+    let mut avatar: Option<Arc<Vec<u8>>> = None;
+    if let Ok(Ok((send, recv))) = tokio::time::timeout(Duration::from_secs(3), conn.accept_bi()).await {
+        let mut lines = BufReader::new(recv).lines();
+        if let Ok(Ok(Some(l))) = tokio::time::timeout(Duration::from_secs(3), lines.next_line()).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) {
+                let n = control::clean_name(v["name"].as_str().unwrap_or(""));
+                if !n.is_empty() {
+                    name = n;
+                }
+                token_in = v["token"].as_str().map(|t| t.chars().take(64).collect());
+                avatar = v["avatar"].as_str().and_then(crate::avatar::from_b64);
+            }
+        }
+        ctl = Some((send, lines));
+    }
+    let mut who = if name == shown.to_string() { name.clone() } else { format!("{name} ({shown})") };
+    if avatar.is_some() {
+        who.push_str(crate::i18n::t(" [com foto]"));
+    }
+
+    // Quem já foi aprovado nesta transmissão e caiu volta direto (sem sala de espera).
+    let returning = token_in.as_ref().and_then(|t| TOKENS.lock().unwrap().get(t).copied());
+    let token = match (&token_in, returning) {
+        (Some(t), Some(_)) => t.clone(),
+        _ => new_token(),
+    };
+
     // Sala de espera: aguarda o transmissor aprovar (até 2 minutos).
-    if approval {
+    if approval && returning.is_none() {
         let id = NEXT_PENDING.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         DECISIONS.lock().unwrap().insert(id, tx);
-        state::host(|h| h.pending.push((id, shown.to_string())));
-        log(crate::tr!("[espectador] {shown} aguardando aprovação", "[viewer] {shown} waiting for approval"));
+        state::host(|h| h.pending.push((id, who.clone())));
+        log(crate::tr!("[espectador] {who} aguardando aprovação", "[viewer] {who} waiting for approval"));
         let approved = tokio::select! {
             r = tokio::time::timeout(Duration::from_secs(120), rx) => matches!(r, Ok(Ok(true))),
             _ = conn.closed() => false,
@@ -915,21 +1168,59 @@ async fn handle_viewer(
         DECISIONS.lock().unwrap().remove(&id);
         state::host(|h| h.pending.retain(|(p, _)| *p != id));
         if !approved {
-            log(crate::tr!("[espectador] {shown} não aprovado", "[viewer] {shown} not approved"));
+            log(crate::tr!("[espectador] {who} não aprovado", "[viewer] {who} not approved"));
             conn.close(3u32.into(), b"entrada recusada pelo transmissor");
             return Ok(());
         }
     }
+    let granted_bits = returning.unwrap_or(0);
+    TOKENS.lock().unwrap().insert(token.clone(), granted_bits);
+    let member_id = format!("v{}", NEXT_MEMBER.fetch_add(1, Ordering::Relaxed));
+    MEMBERS.lock().unwrap().push(MemberEntry {
+        m: state::Member { id: member_id.clone(), name: name.clone(), host: false, ctl: granted_bits },
+        avatar: avatar.clone(),
+    });
+    if let Some(a) = &avatar {
+        state::host(|h| {
+            h.avatars.insert(member_id.clone(), a.clone());
+        });
+        if let Some(tx) = ROSTER.lock().unwrap().as_ref() {
+            let _ = tx.send(avatar_msg(&member_id, a));
+        }
+    }
+    publish_roster();
 
     let lagged = Arc::new(AtomicU64::new(0));
     let stalled_ms = Arc::new(AtomicU64::new(0));
+    let wants = Arc::new(AtomicU8::new(0));
+    let granted = Arc::new(AtomicU8::new(granted_bits));
+    let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
     conn.set_send_window(net::send_window_for(state::host(|h| h.bitrate)));
-    viewers
-        .lock()
-        .unwrap()
-        .insert(addr, Viewer { conn: conn.clone(), lagged: lagged.clone(), stalled_ms: stalled_ms.clone() });
+    viewers.lock().unwrap().insert(
+        addr,
+        Viewer {
+            conn: conn.clone(),
+            lagged: lagged.clone(),
+            stalled_ms: stalled_ms.clone(),
+            name: name.clone(),
+            id: member_id.clone(),
+            wants: wants.clone(),
+            granted: granted.clone(),
+        },
+    );
     CONNS.lock().unwrap().insert(addr.to_string(), conn.clone());
-    log(crate::tr!("[espectador] + {shown} conectado", "[viewer] + {shown} connected"));
+    REMOTE.lock().unwrap().insert(
+        addr.to_string(),
+        RemoteSlot { id: member_id.clone(), name: name.clone(), token: token.clone(), granted: granted.clone(), notify: perm_tx.clone() },
+    );
+    if returning.is_some() {
+        log(crate::tr!("[espectador] + {who} reconectado", "[viewer] + {who} reconnected"));
+    } else {
+        log(crate::tr!("[espectador] + {who} conectado", "[viewer] + {who} connected"));
+    }
+
+    // Entrada do espectador no PC do transmissor (só com permissão). Ao sair, solta tudo.
+    let injector = Arc::new(Mutex::new(remote::Injector::default()));
 
     let video = {
         let conn = conn.clone();
@@ -1019,17 +1310,162 @@ async fn handle_viewer(
         }
     };
 
+    // Mensagens do espectador (chat, reações, pedido de controle, teclas) e para ele (chat de todos,
+    // mudanças de permissão).
+    let control_task = {
+        let (chat_tx, name, wants, granted, injector) = (chat_tx.clone(), name.clone(), wants.clone(), granted.clone(), injector.clone());
+        let member_id = member_id.clone();
+        async move {
+            let Some((mut send, mut lines)) = ctl else {
+                std::future::pending::<()>().await;
+                unreachable!()
+            };
+            let mut roster_rx = ROSTER.lock().unwrap().as_ref().map(|tx| tx.subscribe());
+            control::send(&mut send, &serde_json::json!({ "t": "welcome", "host": crate::settings::nick(), "token": token, "you": member_id })).await?;
+            let avatars: Vec<serde_json::Value> =
+                MEMBERS.lock().unwrap().iter().filter_map(|e| e.avatar.as_ref().map(|a| avatar_msg(&e.m.id, a))).collect();
+            for a in avatars {
+                control::send(&mut send, &a).await?;
+            }
+            control::send(&mut send, &roster_json()).await?;
+            if granted_bits != 0 {
+                control::send(&mut send, &serde_json::json!({ "t": "control", "pad": granted_bits & CTL_PAD != 0, "kbm": granted_bits & CTL_KBM != 0 })).await?;
+            }
+            let mut chat_rx = chat_tx.subscribe();
+            let mut open = true;
+            // Limite de mensagens: 8 a cada 10 s.
+            let mut recent: std::collections::VecDeque<Instant> = Default::default();
+            loop {
+                tokio::select! {
+                    l = lines.next_line(), if open => {
+                        let Some(l) = l? else { open = false; continue };
+                        let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) else { continue };
+                        let g = granted.load(Ordering::Relaxed);
+                        match v["t"].as_str().unwrap_or("") {
+                            t @ ("chat" | "react") => {
+                                while recent.front().is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
+                                    recent.pop_front();
+                                }
+                                if recent.len() >= 8 {
+                                    continue;
+                                }
+                                let msg = if t == "chat" {
+                                    control::clean_text(v["text"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: false })
+                                } else {
+                                    control::clean_react(v["r"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: true })
+                                };
+                                if let Some(m) = msg {
+                                    recent.push_back(Instant::now());
+                                    let _ = chat_tx.send(m);
+                                }
+                            }
+                            "control_req" => {
+                                let bits = (if v["pad"].as_bool() == Some(true) { CTL_PAD } else { 0 })
+                                    | (if v["kbm"].as_bool() == Some(true) { CTL_KBM } else { 0 });
+                                wants.store(bits, Ordering::Relaxed);
+                                if bits == 0 {
+                                    if g != 0 {
+                                        set_control(&addr.to_string(), 0);
+                                    }
+                                    log(crate::tr!("[controle] {} parou de pedir controle", "[control] {} withdrew the control request", name));
+                                } else {
+                                    // Só mantém o que continua sendo pedido.
+                                    if g & !bits != 0 {
+                                        set_control(&addr.to_string(), g & bits);
+                                    }
+                                    log(crate::tr!("[controle] {} pediu para jogar ({})", "[control] {} asked to play ({})", name, control::ctl_desc(bits)));
+                                }
+                            }
+                            "key" if g & CTL_KBM != 0 => {
+                                let (sc, ext, down) = (v["sc"].as_u64().unwrap_or(0) as u16, v["ext"].as_bool() == Some(true), v["down"].as_bool() == Some(true));
+                                injector.lock().unwrap().key(sc, ext, down);
+                            }
+                            "mbtn" if g & CTL_KBM != 0 => {
+                                injector.lock().unwrap().button(v["b"].as_u64().unwrap_or(9) as u8, v["down"].as_bool() == Some(true));
+                            }
+                            "wheel" if g & CTL_KBM != 0 => {
+                                injector.lock().unwrap().wheel(v["d"].as_i64().unwrap_or(0) as i32, v["h"].as_bool() == Some(true));
+                            }
+                            _ => {}
+                        }
+                    }
+                    m = chat_rx.recv() => match m {
+                        Ok(m) => control::send(&mut send, &m.to_json()).await?,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+                    },
+                    r = async { match roster_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => match r {
+                        Ok(v) => control::send(&mut send, &v).await?,
+                        Err(broadcast::error::RecvError::Lagged(_)) => control::send(&mut send, &roster_json()).await?,
+                        Err(broadcast::error::RecvError::Closed) => roster_rx = None,
+                    },
+                    n = perm_rx.recv() => {
+                        let g = granted.load(Ordering::Relaxed);
+                        {
+                            let mut inj = injector.lock().unwrap();
+                            if g & CTL_KBM == 0 { inj.release_kbm(); }
+                            if g & CTL_PAD == 0 { inj.release_pad(); }
+                        }
+                        control::send(&mut send, &serde_json::json!({ "t": "control", "pad": g & CTL_PAD != 0, "kbm": g & CTL_KBM != 0 })).await?;
+                        if let Some(Some(text)) = n {
+                            control::send(&mut send, &serde_json::json!({ "t": "notice", "text": text })).await?;
+                        }
+                    }
+                }
+            }
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        }
+    };
+
+    // Controle (gamepad) e movimento do mouse: datagramas (o mais recente vale).
+    let datagrams = {
+        let (conn, granted, injector, name, perm_tx) = (conn.clone(), granted.clone(), injector.clone(), name.clone(), perm_tx.clone());
+        async move {
+            loop {
+                let d = conn.read_datagram().await?;
+                let g = granted.load(Ordering::Relaxed);
+                if let (true, Some(p)) = (g & CTL_PAD != 0, control::Pad::decode(&d)) {
+                    let r = injector.lock().unwrap().pad(&p);
+                    if let Err(e) = r {
+                        // Sem o driver do controle virtual: revoga só o controle e avisa os dois lados.
+                        log(crate::tr!("[controle] controle de {} indisponível: {e:#}", "[control] controller for {} unavailable: {e:#}", name));
+                        granted.fetch_and(!CTL_PAD, Ordering::Relaxed);
+                        let _ = perm_tx.send(Some(crate::i18n::t("o transmissor não tem o driver de controle virtual (ViGEmBus) instalado; use teclado e mouse ou peça para ele instalar").into()));
+                    }
+                } else if let (true, Some((dx, dy))) = (g & CTL_KBM != 0, control::decode_mouse(&d)) {
+                    injector.lock().unwrap().mouse_move(dx, dy);
+                }
+            }
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        }
+    };
+
     let res: Result<()> = tokio::select! {
         r = video => r,
         r = audio => r,
         r = stats => r,
+        r = control_task => r,
+        r = datagrams => r,
         e = conn.closed() => Err(e.into()),
     };
     viewers.lock().unwrap().remove(&addr);
     CONNS.lock().unwrap().remove(&addr.to_string());
+    REMOTE.lock().unwrap().remove(&addr.to_string());
+    MEMBERS.lock().unwrap().retain(|e| e.m.id != member_id);
+    state::host(|h| {
+        h.avatars.remove(&member_id);
+    });
+    publish_roster();
+    {
+        let mut inj = injector.lock().unwrap();
+        inj.release_kbm();
+        inj.release_pad();
+    }
     match res {
-        Err(e) => log(crate::tr!("[espectador] - {shown} desconectado ({e})", "[viewer] - {shown} disconnected ({e})")),
-        Ok(()) => log(crate::tr!("[espectador] - {shown} desconectado", "[viewer] - {shown} disconnected")),
+        Err(e) => log(crate::tr!("[espectador] - {who} desconectado ({e})", "[viewer] - {who} disconnected ({e})")),
+        Ok(()) => log(crate::tr!("[espectador] - {who} desconectado", "[viewer] - {who} disconnected")),
     }
     Ok(())
 }

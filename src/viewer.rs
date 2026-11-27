@@ -103,12 +103,182 @@ pub fn mpv_args(mode: &str, title: &str, ipc: Option<&str>) -> Vec<String> {
     a
 }
 
+/// Ações do usuário na janela do vídeo (chat e reações digitados no próprio vídeo).
+#[derive(Debug, Clone)]
+pub enum OverlayEv {
+    Chat(String),
+    React(String),
+}
+
+/// O que a interface (ou o terminal) manda para o transmissor.
+#[derive(Debug, Clone)]
+enum Outgoing {
+    Chat(String),
+    React(String),
+    ControlReq { pad: bool, kbm: bool },
+}
+
+static OUT: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Outgoing>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+fn out(m: Outgoing) {
+    if let Some(tx) = OUT.lock().unwrap().as_ref() {
+        let _ = tx.send(m);
+    }
+}
+
+/// Envia uma mensagem no chat da transmissão que você está assistindo.
+pub fn send_chat(text: &str) {
+    if let Some(t) = crate::control::clean_text(text) {
+        out(Outgoing::Chat(t));
+    }
+}
+
+pub fn send_react(r: &str) {
+    if let Some(r) = crate::control::clean_react(r) {
+        out(Outgoing::React(r));
+    }
+}
+
+/// Pede (ou desiste de) jogar no PC do transmissor.
+pub fn request_control(pad: bool, kbm: bool) {
+    out(Outgoing::ControlReq { pad, kbm });
+}
+
+/// Comando IPC que mostra uma mensagem/reação na janela do vídeo.
+pub fn osd_chat_cmd(m: &crate::control::ChatMsg) -> String {
+    let kind = if m.react { "gs-react" } else { "gs-chat" };
+    serde_json::json!({ "command": ["script-message", kind, m.from, m.text] }).to_string()
+}
+
+/// Lado do avatar na janela do vídeo (pixels).
+const OSD_AVATAR: u32 = 40;
+
+/// Grava o avatar redondo em BGRA pré-multiplicado (formato do `overlay-add` do mpv) numa pasta
+/// temporária e devolve o caminho. O nome do arquivo depende do conteúdo, então só é gravado uma vez.
+fn avatar_bgra_file(png: &[u8]) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    png.hash(&mut h);
+    let path = std::env::temp_dir().join(format!("gamestream-av-{}-{:016x}.bgra", std::process::id(), h.finish()));
+    if path.exists() {
+        return Some(path);
+    }
+    if !crate::avatar::valid(png) {
+        return None;
+    }
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()?
+        .resize_exact(OSD_AVATAR, OSD_AVATAR, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let c = (OSD_AVATAR as f32 - 1.0) / 2.0;
+    let r = OSD_AVATAR as f32 / 2.0;
+    let mut out = Vec::with_capacity((OSD_AVATAR * OSD_AVATAR * 4) as usize);
+    for (x, y, p) in img.enumerate_pixels() {
+        let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
+        let a = p[3] as f32 / 255.0 * (r - d).clamp(0.0, 1.0);
+        out.extend_from_slice(&[(p[2] as f32 * a) as u8, (p[1] as f32 * a) as u8, (p[0] as f32 * a) as u8, (a * 255.0) as u8]);
+    }
+    std::fs::write(&path, out).ok()?;
+    Some(path)
+}
+
+/// Apaga os avatares temporários deste processo.
+pub fn cleanup_osd_avatars() {
+    let prefix = format!("gamestream-av-{}-", std::process::id());
+    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Comando IPC com quem está na sala (nome, avatar, transmissor, jogando) para a coluna de avatares
+/// da janela do vídeo (como no Discord: passe o mouse para ver o nome).
+pub fn members_osd_cmd(list: &[state::Member], avatars: &std::collections::HashMap<String, Arc<Vec<u8>>>) -> String {
+    let arr: Vec<serde_json::Value> = list
+        .iter()
+        .take(16)
+        .map(|m| {
+            let file = avatars.get(&m.id).and_then(|a| avatar_bgra_file(a)).map(|p| p.display().to_string());
+            serde_json::json!({ "id": m.id, "name": m.name, "host": m.host, "ctl": m.ctl, "file": file, "size": OSD_AVATAR })
+        })
+        .collect();
+    serde_json::json!({ "command": ["script-message", "gs-members", serde_json::Value::Array(arr).to_string()] }).to_string()
+}
+
+fn osd_status_cmd(text: &str) -> String {
+    serde_json::json!({ "command": ["script-message", "gs-status", text] }).to_string()
+}
+
+/// Evento "client-message" do mpv vindo do painel (chat/reação digitados no vídeo).
+fn overlay_event(v: &serde_json::Value) -> Option<OverlayEv> {
+    if v["event"] != "client-message" {
+        return None;
+    }
+    let args = v["args"].as_array()?;
+    let text = args.get(1)?.as_str()?.to_string();
+    match args.first()?.as_str()? {
+        "gs-out-chat" => Some(OverlayEv::Chat(text)),
+        "gs-out-react" => Some(OverlayEv::React(text)),
+        _ => None,
+    }
+}
+
+async fn open_ipc(pipe: &str) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
+    for _ in 0..50 {
+        if let Ok(c) = ClientOptions::new().open(pipe) {
+            return Some(c);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// Ponte simples entre o chat e uma janela do mpv (usada na pré-visualização do transmissor).
+pub async fn overlay_bridge(
+    pipe: String,
+    mut osd_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ev_tx: tokio::sync::mpsc::UnboundedSender<OverlayEv>,
+) {
+    let Some(client) = open_ipc(&pipe).await else { return };
+    let (rd, mut wr) = tokio::io::split(client);
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(rd).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(ev) = serde_json::from_str::<serde_json::Value>(&line).ok().as_ref().and_then(overlay_event) {
+                let _ = ev_tx.send(ev);
+            }
+        }
+    });
+    while let Some(cmd) = osd_rx.recv().await {
+        if wr.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
+            break;
+        }
+    }
+}
+
 pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
     state::view(|v| *v = state::ViewStatus::default());
     let r = tokio::select! {
         r = run_inner(o) => r,
         _ = stop => Ok(()),
     };
+    *OUT.lock().unwrap() = None;
+    crate::remote::stop_kbm_capture();
+    cleanup_osd_avatars();
+    state::view(|v| {
+        v.roster.clear();
+        v.avatars.clear();
+        v.chat.clear();
+    });
+    state::view(|v| {
+        v.reconnecting = None;
+        v.ctl_granted = 0;
+        v.kbm_active = false;
+    });
     match &r {
         Ok(()) => view_phase(ViewPhase::Idle, crate::i18n::t("Desconectado.")),
         Err(e) => {
@@ -119,8 +289,144 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
     r
 }
 
+/// Erro que não adianta tentar de novo (senha errada, removido, entrada recusada).
+#[derive(Debug)]
+struct Fatal(String);
+
+impl std::fmt::Display for Fatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Fatal {}
+
+fn is_fatal(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Fatal>().is_some()
+}
+
+/// Erro ao encerrar a conexão: códigos 1 (senha), 2 (removido) e 3 (recusado) são definitivos.
+fn closed_error(e: quinn::ConnectionError) -> anyhow::Error {
+    match e {
+        quinn::ConnectionError::ApplicationClosed(c) => {
+            let why = crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason));
+            let msg = crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", why);
+            if matches!(u64::from(c.error_code), 1..=3) {
+                anyhow!(Fatal(msg))
+            } else {
+                anyhow!(msg)
+            }
+        }
+        e => anyhow!("{}", crate::tr!("conexão com o transmissor perdida: {e}", "connection to the streamer lost: {e}")),
+    }
+}
+
+/// Conexão pronta (aprovada pelo transmissor), antes de começar a receber.
+struct Joined {
+    ep: quinn::Endpoint,
+    conn: quinn::Connection,
+    first: quinn::RecvStream,
+    ctl: Option<(quinn::SendStream, quinn::RecvStream)>,
+    /// Código da sala deste transmissor (para a lista de salas recentes).
+    room_code: Option<String>,
+    via: String,
+}
+
+/// Janela do vídeo (mpv). Sobrevive às reconexões: a imagem volta na mesma janela.
+struct Player {
+    child: tokio::process::Child,
+    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
+    pid: u32,
+    osd_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ev_rx: tokio::sync::mpsc::UnboundedReceiver<OverlayEv>,
+    ipc: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        self.ipc.abort();
+    }
+}
+
+enum End {
+    /// O usuário fechou a janela do vídeo.
+    Closed,
+    /// Não adianta reconectar.
+    Fatal(anyhow::Error),
+    /// A conexão caiu: tenta voltar.
+    Lost(anyhow::Error),
+}
+
 async fn run_inner(o: ViewOpts) -> Result<()> {
-    view_phase(ViewPhase::Connecting, crate::i18n::t("Conectando..."));
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
+    *OUT.lock().unwrap() = Some(out_tx);
+    let mut token: Option<String> = None;
+    let mut player: Option<Player> = None;
+    let mut lost_since: Option<std::time::Instant> = None;
+    let mut attempt = 0u32;
+    loop {
+        let joined = connect(&o, token.as_deref(), lost_since.is_some()).await;
+        let j = match joined {
+            Ok(j) => j,
+            Err(e) if lost_since.is_none() || is_fatal(&e) => return Err(e),
+            Err(e) => {
+                if lost_since.is_some_and(|t| t.elapsed() > Duration::from_secs(180)) {
+                    bail!("{}", crate::tr!("não foi possível reconectar em 3 minutos: {e:#}", "could not reconnect within 3 minutes: {e:#}"));
+                }
+                attempt += 1;
+                let text = crate::tr!(
+                    "Conexão perdida. Reconectando (tentativa {})...",
+                    "Connection lost. Reconnecting (attempt {})...",
+                    attempt
+                );
+                state::view(|v| v.reconnecting = Some(text.clone()));
+                if let Some(p) = &player {
+                    let _ = p.osd_tx.send(osd_status_cmd(&text));
+                }
+                let wait = Duration::from_secs((attempt as u64 * 2).min(5));
+                match player.as_mut() {
+                    Some(p) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep(wait) => {}
+                            _ = p.child.wait() => { log(crate::i18n::t("Janela de vídeo fechada.")); return Ok(()); }
+                        }
+                    }
+                    None => tokio::time::sleep(wait).await,
+                }
+                continue;
+            }
+        };
+        if lost_since.take().is_some() {
+            log(crate::i18n::t("Reconectado."));
+        }
+        attempt = 0;
+        state::view(|v| v.reconnecting = None);
+        match session(j, &o, &mut player, &mut out_rx, &mut token).await {
+            End::Closed => return Ok(()),
+            End::Fatal(e) => return Err(e),
+            End::Lost(e) => {
+                log(crate::tr!("{e:#}. Tentando reconectar...", "{e:#}. Trying to reconnect..."));
+                lost_since = Some(std::time::Instant::now());
+                let text = crate::i18n::t("Conexão perdida. Reconectando...").to_string();
+                state::view(|v| {
+                    v.phase = ViewPhase::Connecting;
+                    v.reconnecting = Some(text.clone());
+                    v.ctl_granted = 0;
+                    v.kbm_active = false;
+                });
+                if let Some(p) = &player {
+                    let _ = p.osd_tx.send(osd_status_cmd(&text));
+                }
+            }
+        }
+    }
+}
+
+/// Conecta (pelo código da sala ou pelo convite), envia a senha e o nome, e espera a aprovação.
+async fn connect(o: &ViewOpts, token: Option<&str>, reconnecting: bool) -> Result<Joined> {
+    if !reconnecting {
+        view_phase(ViewPhase::Connecting, crate::i18n::t("Conectando..."));
+    }
     let mut ep = net::client_bind()?;
     let local_port = ep.local_addr()?.port();
     let reply_addrs: Vec<SocketAddr> = invite::local_addrs(local_port)
@@ -134,6 +440,7 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     // consegue redirecionar para outro transmissor.
     let server = crate::room::server();
     let mut room_notified = false;
+    let room_code;
     let inv = if let Some(code) = crate::room::parse_code(&o.invite) {
         let server = server.clone().context(crate::i18n::t("servidor de encontro não configurado; use o convite GS-..."))?;
         log(crate::tr!("Procurando a sala {}...", "Looking up room {}...", crate::room::display(&code)));
@@ -142,12 +449,14 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         let inv = invite::decode(&invite_text, net::DEFAULT_PORT).await?;
         let fp = inv.fingerprint.context(crate::i18n::t("convite inválido"))?;
         if crate::room::code_from_fp(&fp) != code {
-            bail!("{}", crate::i18n::t("o convite recebido não corresponde ao código da sala"));
+            bail!(Fatal(crate::i18n::t("o convite recebido não corresponde ao código da sala").into()));
         }
         room_notified = true;
+        room_code = Some(code);
         inv
     } else {
         let inv = invite::decode(&o.invite, net::DEFAULT_PORT).await?;
+        room_code = inv.fingerprint.map(|fp| crate::room::code_from_fp(&fp));
         // Convite completo: avisa o transmissor pela sala dele (se estiver aberta), em segundo plano.
         if let (Some(server), Some(fp)) = (server.clone(), inv.fingerprint) {
             let (code, r) = (crate::room::code_from_fp(&fp), reply_addrs.clone());
@@ -156,7 +465,7 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         }
         inv
     };
-    if inv.fingerprint.is_none() {
+    if inv.fingerprint.is_none() && !reconnecting {
         log(crate::i18n::t("Aviso: conexão por IP direto, sem verificação da identidade do transmissor. Recomenda-se usar o convite GS-..."));
     }
     if room_notified {
@@ -169,9 +478,15 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     // direta não responder, exibe o código de resposta: quando o transmissor o usa ("Liberar
     // espectador"), o firewall dele passa a aceitar estas tentativas (hole punching). Com a sala, a
     // liberação já foi pedida automaticamente e o código de resposta só aparece se demorar.
-    let reply_code = (!reply_addrs.is_empty()).then(|| invite::encode_reply(&reply_addrs));
+    let reply_code = (!reply_addrs.is_empty() && !reconnecting).then(|| invite::encode_reply(&reply_addrs));
     let show_reply_after = Duration::from_secs(if room_notified { 10 } else { 3 });
-    let wait_total = if inv.fingerprint.is_some() && reply_code.is_some() { 180 } else { 8 };
+    let wait_total = if reconnecting {
+        15
+    } else if inv.fingerprint.is_some() && reply_code.is_some() {
+        180
+    } else {
+        8
+    };
     let start = std::time::Instant::now();
     let mut tries = JoinSet::new();
     let mut next_round = tokio::time::Instant::now();
@@ -223,11 +538,28 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     // Sem convite (IP direto) não há como saber se é mesmo o host: não manda a senha às cegas.
     if inv.fingerprint.is_none() && o.password.is_some() {
         conn.close(0u32.into(), b"");
-        bail!(crate::i18n::t("por segurança, a senha só é enviada em conexões pelo convite GS-..., que verifica a identidade do transmissor"));
+        bail!(Fatal(crate::i18n::t("por segurança, a senha só é enviada em conexões pelo convite GS-..., que verifica a identidade do transmissor").into()));
     }
     let mut auth = conn.open_uni().await?;
-    auth.write_all(o.password.unwrap_or_default().as_bytes()).await?;
+    auth.write_all(o.password.clone().unwrap_or_default().as_bytes()).await?;
     auth.finish()?;
+    // Canal de controle: nome (e token de reconexão), chat e controle remoto.
+    let ctl = match conn.open_bi().await {
+        Ok((mut send, recv)) => {
+            let hello = serde_json::json!({
+                "t": "hello",
+                "name": crate::settings::nick(),
+                "token": token,
+                "v": env!("CARGO_PKG_VERSION"),
+                "avatar": crate::avatar::load().map(|a| crate::avatar::to_b64(&a)),
+            });
+            match crate::control::send(&mut send, &hello).await {
+                Ok(()) => Some((send, recv)),
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    };
     let via = conn.remote_address().ip().to_canonical().to_string();
     let code = net::peer_security_code(&conn).unwrap_or_else(|| "?".into());
     let verified = inv.fingerprint.is_some();
@@ -235,40 +567,102 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         if verified { crate::i18n::t("identidade verificada pelo convite") } else { crate::i18n::t("identidade não verificada") }
     ));
     state::view(|v| {
-        v.text = crate::i18n::t("Aguardando aprovação do transmissor...").into();
+        if !reconnecting {
+            v.text = crate::i18n::t("Aguardando aprovação do transmissor...").into();
+        }
         v.peer = via.clone();
         v.code = code.clone();
         v.verified = verified;
         v.reply_code = None;
     });
     // O primeiro fluxo só chega quando o transmissor aprova a entrada (sala de espera).
-    let first = match conn.accept_uni().await {
-        Ok(s) => s,
-        Err(quinn::ConnectionError::ApplicationClosed(c)) => bail!(
-            "{}",
-            crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason)))
-        ),
-        Err(e) => bail!("{}", crate::tr!("conexão com o transmissor perdida: {e}", "connection to the streamer lost: {e}")),
-    };
-    state::view(|v| {
-        v.phase = ViewPhase::Connected;
-        v.text = crate::i18n::t("Conectado").into();
-    });
+    let first = conn.accept_uni().await.map_err(closed_error)?;
+    Ok(Joined { ep, conn, first, ctl, room_code, via })
+}
 
+/// Inicia a janela do vídeo (mpv) e a ponte de controle (volume, estatísticas, chat).
+fn start_player(o: &ViewOpts, via: &str) -> Result<Player> {
     let pipe = format!(r"\\.\pipe\gamestream-mpv-{}", std::process::id());
-    let mpv = find_mpv(o.mpv);
+    let mpv = find_mpv(o.mpv.clone());
     let mut child = Command::new(&mpv)
         .args(mpv_args("viewer", &format!("GameStream - {via}"), Some(&pipe)))
         .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .with_context(|| crate::tr!("player não encontrado ({}). O mpv.exe deve estar na mesma pasta do gamestream.exe", "player not found ({}). mpv.exe must be in the same folder as gamestream.exe", mpv.display()))?;
-    let mut stdin = Some(child.stdin.take().unwrap());
+    let stdin = Arc::new(tokio::sync::Mutex::new(child.stdin.take().context("stdin do player")?));
+    let pid = child.id().unwrap_or(0);
+    let (osd_tx, osd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
+    let ipc = tokio::spawn(async move { mpv_control(&pipe, osd_rx, ev_tx).await });
+    Ok(Player { child, stdin, pid, osd_tx, ev_rx, ipc })
+}
 
-    let mut tasks = JoinSet::new();
-    let audio_device = o.audio_device;
-    let control = mpv_control(&pipe);
-    tokio::pin!(control);
+/// Texto de status do controle remoto exibido na janela do vídeo.
+fn control_status(granted: u8, capturing: bool) -> String {
+    let mut parts = Vec::new();
+    if granted & crate::control::CTL_KBM != 0 {
+        parts.push(if capturing {
+            crate::i18n::t("🎮 Teclado e mouse controlando o jogo do transmissor  ·  F8 para soltar").to_string()
+        } else {
+            crate::i18n::t("Teclado e mouse liberados: pressione F8 para jogar").to_string()
+        });
+    }
+    if granted & crate::control::CTL_PAD != 0 {
+        parts.push(crate::i18n::t("🎮 Seu controle está ligado ao jogo do transmissor").to_string());
+    }
+    parts.join("\\N")
+}
+
+async fn session(
+    j: Joined,
+    o: &ViewOpts,
+    player: &mut Option<Player>,
+    out_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outgoing>,
+    token: &mut Option<String>,
+) -> End {
+    let Joined { ep, conn, first, ctl, room_code, via } = j;
+    state::view(|v| {
+        v.phase = ViewPhase::Connected;
+        v.text = crate::i18n::t("Conectado").into();
+        v.has_control = false;
+    });
+    if player.as_mut().is_some_and(|p| p.child.try_wait().ok().flatten().is_some()) {
+        *player = None; // a janela foi fechada durante a reconexão
+    }
+    if player.is_none() {
+        match start_player(o, &via) {
+            Ok(p) => *player = Some(p),
+            Err(e) => return End::Fatal(e),
+        }
+    }
+    let p = player.as_mut().unwrap();
+    let _ = p.osd_tx.send(osd_status_cmd(""));
+    let end = run_session(&conn, first, ctl, room_code, p, out_rx, token, o).await;
+    crate::remote::stop_kbm_capture();
+    conn.close(0u32.into(), b"desconectado");
+    let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
+    end
+}
+
+/// Evento do canal de controle (lido numa tarefa separada).
+enum CtlEv {
+    Msg(serde_json::Value),
+    Closed,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    conn: &quinn::Connection,
+    first: quinn::RecvStream,
+    ctl: Option<(quinn::SendStream, quinn::RecvStream)>,
+    room_code: Option<String>,
+    p: &mut Player,
+    out_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outgoing>,
+    token: &mut Option<String>,
+    o: &ViewOpts,
+) -> End {
+    let mut tasks: JoinSet<Result<()>> = JoinSet::new();
     let frames = Arc::new(AtomicU64::new(0));
     let bytes = Arc::new(AtomicU64::new(0));
     // Soma dos quadrados (f32 em bits u64 via acumulação inteira) e nº de amostras de áudio recebidas.
@@ -278,26 +672,236 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (mut last_frames, mut last_bytes, mut last_t) = (0u64, 0u64, std::time::Instant::now());
     let mut pending_first = Some(first);
+    let mut have_video = false;
+
+    // Canal de controle: leitura numa tarefa (para não perder mensagens no select), escrita aqui.
+    let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<CtlEv>();
+    let mut ctl_send = None;
+    let mut reader_task = None;
+    if let Some((send, recv)) = ctl {
+        ctl_send = Some(send);
+        reader_task = Some(tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(recv).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                if let Ok(v) = serde_json::from_str(&l) {
+                    if ctl_tx.send(CtlEv::Msg(v)).is_err() {
+                        return;
+                    }
+                }
+            }
+            let _ = ctl_tx.send(CtlEv::Closed);
+        }));
+    }
+    struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            if let Some(h) = self.0.take() {
+                h.abort();
+            }
+        }
+    }
+    let _reader_guard = AbortOnDrop(reader_task);
+
+    // Controle remoto.
+    let mut granted = 0u8;
+    let mut pad_task = AbortOnDrop(None);
+    let (kbm_tx, mut kbm_rx) = tokio::sync::mpsc::unbounded_channel::<crate::remote::InputEv>();
+    let mut last_status = String::new();
+    // Pedido de controle feito antes (ex.: antes de uma reconexão) é refeito automaticamente.
+    let asked = state::view(|v| v.ctl_asked);
+    let mut pending_out: Vec<serde_json::Value> = Vec::new();
+    if asked != 0 {
+        pending_out.push(serde_json::json!({ "t": "control_req", "pad": asked & crate::control::CTL_PAD != 0, "kbm": asked & crate::control::CTL_KBM != 0 }));
+    }
+
     let result = loop {
+        // Mensagens para o transmissor (pedidos de controle, teclas...).
+        if !pending_out.is_empty() {
+            if let Some(send) = ctl_send.as_mut() {
+                for m in pending_out.drain(..) {
+                    if crate::control::send(send, &m).await.is_err() {
+                        break;
+                    }
+                }
+            } else {
+                pending_out.clear();
+            }
+        }
+        // Status do controle remoto na janela do vídeo.
+        let status = control_status(granted, crate::remote::kbm_capturing());
+        if status != last_status {
+            let _ = p.osd_tx.send(osd_status_cmd(&status));
+            last_status = status;
+        }
+
         let mut st = if let Some(s) = pending_first.take() {
             s
         } else {
             tokio::select! {
                 st = conn.accept_uni() => match st {
                     Ok(s) => s,
-                    Err(quinn::ConnectionError::ApplicationClosed(c)) => {
-                        break Err(anyhow!("{}", crate::tr!("o transmissor encerrou a conexão: {}", "the streamer closed the connection: {}", crate::i18n::t_dyn(&String::from_utf8_lossy(&c.reason)))));
+                    Err(e) => {
+                        let e = closed_error(e);
+                        break if is_fatal(&e) { End::Fatal(e) } else { End::Lost(e) };
                     }
-                    Err(e) => break Err(anyhow!("{}", crate::tr!("conexão com o transmissor perdida: {e}", "connection to the streamer lost: {e}"))),
                 },
                 Some(r) = tasks.join_next() => {
-                    break match r? {
-                        Ok(()) => { log(crate::i18n::t("O transmissor encerrou a transmissão.")); Ok(()) }
-                        Err(e) => Err(anyhow!("{}", crate::tr!("transmissão interrompida: {e:#}", "stream interrupted: {e:#}"))),
-                    };
+                    match r {
+                        Ok(Ok(())) => continue,
+                        Ok(Err(e)) => break End::Lost(anyhow!("{}", crate::tr!("transmissão interrompida: {e:#}", "stream interrupted: {e:#}"))),
+                        Err(e) => break End::Lost(e.into()),
+                    }
                 }
-                _ = child.wait() => { log(crate::i18n::t("Janela de vídeo fechada.")); break Ok(()); }
-                _ = &mut control => { continue; }
+                _ = p.child.wait() => { log(crate::i18n::t("Janela de vídeo fechada.")); break End::Closed; }
+                ev = ctl_rx.recv() => {
+                    match ev {
+                        Some(CtlEv::Msg(v)) => {
+                            match v["t"].as_str().unwrap_or("") {
+                                "welcome" => {
+                                    let host = crate::control::clean_name(v["host"].as_str().unwrap_or(""));
+                                    if let Some(t) = v["token"].as_str() {
+                                        *token = Some(t.chars().take(64).collect());
+                                    }
+                                    let you: String = v["you"].as_str().unwrap_or("").chars().take(16).collect();
+                                    state::view(|s| {
+                                        s.host_name = host.clone();
+                                        s.has_control = true;
+                                        s.my_id = you;
+                                    });
+                                    if let Some(code) = &room_code {
+                                        let name = if host.is_empty() { state::view(|s| s.peer.clone()) } else { host.clone() };
+                                        crate::settings::add_recent(code, &name);
+                                    }
+                                }
+                                "chat" | "react" => {
+                                    if let Some(m) = crate::control::ChatMsg::from_json(&v) {
+                                        if m.react {
+                                            log(format!("[chat] {} {}", m.from, m.text));
+                                        } else {
+                                            log(format!("[chat] {}: {}", m.from, m.text));
+                                        }
+                                        let _ = p.osd_tx.send(osd_chat_cmd(&m));
+                                        state::view(|s| state::push_chat(&mut s.chat, m));
+                                    }
+                                }
+                                "control" => {
+                                    let new = (if v["pad"].as_bool() == Some(true) { crate::control::CTL_PAD } else { 0 })
+                                        | (if v["kbm"].as_bool() == Some(true) { crate::control::CTL_KBM } else { 0 });
+                                    if new != granted {
+                                        if new != 0 {
+                                            log(crate::tr!("[controle] o transmissor liberou: {}", "[control] the streamer allowed: {}", crate::control::ctl_desc(new)));
+                                        } else if granted != 0 {
+                                            log(crate::i18n::t("[controle] o transmissor encerrou o seu controle."));
+                                            // Revogado pelo transmissor: não pede de novo sozinho (nem ao reconectar).
+                                            state::view(|s| s.ctl_asked = 0);
+                                        }
+                                    }
+                                    if new & crate::control::CTL_KBM != 0 && granted & crate::control::CTL_KBM == 0 {
+                                        crate::remote::start_kbm_capture(kbm_tx.clone(), p.pid);
+                                    } else if new & crate::control::CTL_KBM == 0 {
+                                        crate::remote::stop_kbm_capture();
+                                    }
+                                    if new & crate::control::CTL_PAD != 0 && pad_task.0.is_none() {
+                                        pad_task.0 = Some(spawn_pad_sender(conn.clone()));
+                                    } else if new & crate::control::CTL_PAD == 0 {
+                                        if let Some(h) = pad_task.0.take() { h.abort(); }
+                                    }
+                                    granted = new;
+                                    state::view(|s| {
+                                        s.ctl_granted = new;
+                                        s.kbm_active = crate::remote::kbm_capturing();
+                                    });
+                                }
+                                "roster" => {
+                                    let list: Vec<state::Member> = v["list"]
+                                        .as_array()
+                                        .map(|a| {
+                                            a.iter()
+                                                .take(64)
+                                                .map(|m| state::Member {
+                                                    id: m["id"].as_str().unwrap_or("").chars().take(16).collect(),
+                                                    name: crate::control::clean_name(m["name"].as_str().unwrap_or("")),
+                                                    host: m["host"].as_bool() == Some(true),
+                                                    ctl: m["ctl"].as_u64().unwrap_or(0) as u8,
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();
+                                    if state::view(|s| s.roster.iter().map(|m| m.name.as_str()).collect::<Vec<_>>() != names) {
+                                        log(crate::tr!("[sala] {} na sala: {}", "[room] {} in the room: {}", names.len(), names.join(", ")));
+                                    }
+                                    let cmd = state::view(|s| {
+                                        s.avatars.retain(|id, _| list.iter().any(|m| &m.id == id));
+                                        s.roster = list;
+                                        members_osd_cmd(&s.roster, &s.avatars)
+                                    });
+                                    let _ = p.osd_tx.send(cmd);
+                                }
+                                "avatar" => {
+                                    let id: String = v["id"].as_str().unwrap_or("").chars().take(16).collect();
+                                    if let Some(png) = v["png"].as_str().and_then(crate::avatar::from_b64) {
+                                        let cmd = state::view(|s| {
+                                            if s.avatars.len() < 64 {
+                                                s.avatars.insert(id, png);
+                                            }
+                                            members_osd_cmd(&s.roster, &s.avatars)
+                                        });
+                                        let _ = p.osd_tx.send(cmd);
+                                    }
+                                }
+                                "notice" => {
+                                    if let Some(t) = v["text"].as_str() {
+                                        log(format!("[{}] {}", crate::i18n::t("transmissor"), crate::i18n::t_dyn(t)));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(CtlEv::Closed) | None => {}
+                    }
+                    continue;
+                }
+                m = out_rx.recv() => {
+                    if let Some(m) = m {
+                        let v = match m {
+                            Outgoing::Chat(text) => serde_json::json!({ "t": "chat", "text": text }),
+                            Outgoing::React(r) => serde_json::json!({ "t": "react", "r": r }),
+                            Outgoing::ControlReq { pad, kbm } => {
+                                let bits = (if pad { crate::control::CTL_PAD } else { 0 }) | (if kbm { crate::control::CTL_KBM } else { 0 });
+                                state::view(|s| s.ctl_asked = bits);
+                                serde_json::json!({ "t": "control_req", "pad": pad, "kbm": kbm })
+                            }
+                        };
+                        if ctl_send.is_none() {
+                            log(crate::i18n::t("O transmissor usa uma versão sem chat/controle remoto. Peça para ele atualizar o GameStream."));
+                        }
+                        pending_out.push(v);
+                    }
+                    continue;
+                }
+                ev = p.ev_rx.recv() => {
+                    match ev {
+                        Some(OverlayEv::Chat(t)) => if let Some(t) = crate::control::clean_text(&t) { pending_out.push(serde_json::json!({ "t": "chat", "text": t })) },
+                        Some(OverlayEv::React(r)) => if let Some(r) = crate::control::clean_react(&r) { pending_out.push(serde_json::json!({ "t": "react", "r": r })) },
+                        None => {}
+                    }
+                    continue;
+                }
+                ev = kbm_rx.recv() => {
+                    use crate::remote::InputEv;
+                    match ev {
+                        Some(InputEv::Move { dx, dy }) => {
+                            let _ = conn.send_datagram(bytes::Bytes::copy_from_slice(&crate::control::encode_mouse(dx, dy)));
+                        }
+                        Some(InputEv::Key { sc, ext, down }) => pending_out.push(serde_json::json!({ "t": "key", "sc": sc, "ext": ext, "down": down })),
+                        Some(InputEv::Button { b, down }) => pending_out.push(serde_json::json!({ "t": "mbtn", "b": b, "down": down })),
+                        Some(InputEv::Wheel { delta, horizontal }) => pending_out.push(serde_json::json!({ "t": "wheel", "d": delta, "h": horizontal })),
+                        Some(InputEv::Capturing(on)) => state::view(|s| s.kbm_active = on),
+                        None => {}
+                    }
+                    continue;
+                }
                 _ = tick.tick() => {
                     let (f, b) = (frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
                     let dt = last_t.elapsed().as_secs_f64().max(0.2);
@@ -312,113 +916,145 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                         v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;
                         v.stats.mbps = (b - last_bytes) as f64 * 8.0 / 1e6 / dt;
                         v.stats.ping_ms = ping;
+                        v.pad_found = crate::remote::read_pad().is_some();
                     });
                     (last_frames, last_bytes, last_t) = (f, b, std::time::Instant::now());
                     continue;
                 }
             }
         };
-        {
-            {
-                let mut kind = [0u8; 1];
-                st.read_exact(&mut kind).await?;
-                match kind[0] {
-                    net::STREAM_VIDEO => {
-                        let Some(mut pipe_in) = stdin.take() else { bail!(crate::i18n::t("o transmissor enviou dois fluxos de vídeo")) };
-                        let (frames, bytes) = (frames.clone(), bytes.clone());
+        let mut kind = [0u8; 1];
+        if let Err(e) = st.read_exact(&mut kind).await {
+            break End::Lost(e.into());
+        }
+        match kind[0] {
+            net::STREAM_VIDEO => {
+                if have_video {
+                    break End::Lost(anyhow!(crate::i18n::t("o transmissor enviou dois fluxos de vídeo")));
+                }
+                have_video = true;
+                let (frames, bytes, stdin) = (frames.clone(), bytes.clone(), p.stdin.clone());
+                tasks.spawn(async move {
+                    let mut pipe_in = stdin.lock().await;
+                    let mut buf = Vec::new();
+                    while net::read_msg(&mut st, &mut buf).await? {
+                        frames.fetch_add(count_frames(&buf), Ordering::Relaxed);
+                        bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
+                        pipe_in.write_all(&buf).await?;
+                    }
+                    Err(anyhow!(crate::i18n::t("o vídeo parou de chegar")))
+                });
+            }
+            net::STREAM_STATS => {
+                tasks.spawn(async move {
+                    let mut lines = tokio::io::BufReader::new(st).lines();
+                    while let Some(l) = lines.next_line().await? {
+                        let mut loss = None;
+                        let mut target = None;
+                        for kv in l.split(';') {
+                            match kv.split_once('=') {
+                                Some(("loss", v)) => loss = v.parse::<f64>().ok(),
+                                Some(("target", v)) => target = v.parse::<u32>().ok(),
+                                _ => {}
+                            }
+                        }
+                        state::view(|v| {
+                            if let Some(x) = loss { v.stats.loss = x; }
+                            if let Some(x) = target { v.stats.target = x; }
+                        });
+                    }
+                    anyhow::Ok(())
+                });
+            }
+            net::STREAM_AUDIO => {
+                let mut hdr = [0u8; 6];
+                if let Err(e) = st.read_exact(&mut hdr).await {
+                    break End::Lost(e.into());
+                }
+                let rate = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+                let ch = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
+                match audio::start_player(rate, ch, o.audio_device.clone()) {
+                    Ok(mut player) => {
+                        let (asq, an) = (audio_sq.clone(), audio_n.clone());
                         tasks.spawn(async move {
                             let mut buf = Vec::new();
                             while net::read_msg(&mut st, &mut buf).await? {
-                                frames.fetch_add(count_frames(&buf), Ordering::Relaxed);
-                                bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
-                                pipe_in.write_all(&buf).await?;
-                            }
-                            anyhow::Ok(())
-                        });
-                    }
-                    net::STREAM_STATS => {
-                        tasks.spawn(async move {
-                            let mut lines = tokio::io::BufReader::new(st).lines();
-                            while let Some(l) = lines.next_line().await? {
-                                let mut loss = None;
-                                let mut target = None;
-                                for kv in l.split(';') {
-                                    match kv.split_once('=') {
-                                        Some(("loss", v)) => loss = v.parse::<f64>().ok(),
-                                        Some(("target", v)) => target = v.parse::<u32>().ok(),
-                                        _ => {}
-                                    }
+                                let mut sq = 0u64;
+                                for c in buf.chunks_exact(2) {
+                                    let v = i16::from_le_bytes([c[0], c[1]]) as i64;
+                                    sq += (v * v) as u64;
                                 }
-                                state::view(|v| {
-                                    if let Some(x) = loss { v.stats.loss = x; }
-                                    if let Some(x) = target { v.stats.target = x; }
-                                });
+                                asq.fetch_add(sq >> 8, Ordering::Relaxed);
+                                an.fetch_add((buf.len() / 2) as u64, Ordering::Relaxed);
+                                player.push(&buf);
                             }
                             anyhow::Ok(())
                         });
                     }
-                    net::STREAM_AUDIO => {
-                        let mut hdr = [0u8; 6];
-                        st.read_exact(&mut hdr).await?;
-                        let rate = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-                        let ch = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
-                        match audio::start_player(rate, ch, audio_device.clone()) {
-                            Ok(mut player) => {
-                                let (asq, an) = (audio_sq.clone(), audio_n.clone());
-                                tasks.spawn(async move {
-                                    let mut buf = Vec::new();
-                                    while net::read_msg(&mut st, &mut buf).await? {
-                                        let mut sq = 0u64;
-                                        for c in buf.chunks_exact(2) {
-                                            let v = i16::from_le_bytes([c[0], c[1]]) as i64;
-                                            sq += (v * v) as u64;
-                                        }
-                                        asq.fetch_add(sq >> 8, Ordering::Relaxed);
-                                        an.fetch_add((buf.len() / 2) as u64, Ordering::Relaxed);
-                                        player.push(&buf);
-                                    }
-                                    anyhow::Ok(())
-                                });
-                            }
-                            Err(e) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
-                        }
-                    }
-                    net::STREAM_AUDIO_OPUS => {
-                        let mut hdr = [0u8; 6];
-                        st.read_exact(&mut hdr).await?;
-                        let rate = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-                        let ch = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
-                        let channels = if ch == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
-                        match (opus::Decoder::new(rate, channels), audio::start_player(rate, ch, audio_device.clone())) {
-                            (Ok(mut dec), Ok(mut player)) => {
-                                let (asq, an) = (audio_sq.clone(), audio_n.clone());
-                                tasks.spawn(async move {
-                                    let mut buf = Vec::new();
-                                    let mut pcm = vec![0f32; 5760 * ch.max(1) as usize];
-                                    while net::read_msg(&mut st, &mut buf).await? {
-                                        if let Ok(n) = dec.decode_float(&buf, &mut pcm, false) {
-                                            let s = &pcm[..n * ch.max(1) as usize];
-                                            let sq: f64 = s.iter().map(|x| (*x as f64 * 32767.0).powi(2)).sum();
-                                            asq.fetch_add((sq as u64) >> 8, Ordering::Relaxed);
-                                            an.fetch_add(s.len() as u64, Ordering::Relaxed);
-                                            player.push_f32(s);
-                                        }
-                                    }
-                                    anyhow::Ok(())
-                                });
-                            }
-                            (Err(e), _) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
-                            (_, Err(e)) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
-                        }
-                    }
-                    k => log(crate::tr!("fluxo desconhecido: {k}", "unknown stream: {k}")),
+                    Err(e) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
                 }
             }
+            net::STREAM_AUDIO_OPUS => {
+                let mut hdr = [0u8; 6];
+                if let Err(e) = st.read_exact(&mut hdr).await {
+                    break End::Lost(e.into());
+                }
+                let rate = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+                let ch = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
+                let channels = if ch == 1 { opus::Channels::Mono } else { opus::Channels::Stereo };
+                match (opus::Decoder::new(rate, channels), audio::start_player(rate, ch, o.audio_device.clone())) {
+                    (Ok(mut dec), Ok(mut player)) => {
+                        let (asq, an) = (audio_sq.clone(), audio_n.clone());
+                        tasks.spawn(async move {
+                            let mut buf = Vec::new();
+                            let mut pcm = vec![0f32; 5760 * ch.max(1) as usize];
+                            while net::read_msg(&mut st, &mut buf).await? {
+                                if let Ok(n) = dec.decode_float(&buf, &mut pcm, false) {
+                                    let s = &pcm[..n * ch.max(1) as usize];
+                                    let sq: f64 = s.iter().map(|x| (*x as f64 * 32767.0).powi(2)).sum();
+                                    asq.fetch_add((sq as u64) >> 8, Ordering::Relaxed);
+                                    an.fetch_add(s.len() as u64, Ordering::Relaxed);
+                                    player.push_f32(s);
+                                }
+                            }
+                            anyhow::Ok(())
+                        });
+                    }
+                    (Err(e), _) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
+                    (_, Err(e)) => log(crate::tr!("Áudio indisponível: {e:#}", "Audio unavailable: {e:#}")),
+                }
+            }
+            k => log(crate::tr!("fluxo desconhecido: {k}", "unknown stream: {k}")),
         }
     };
-    conn.close(0u32.into(), b"desconectado");
-    let _ = tokio::time::timeout(Duration::from_secs(1), ep.wait_idle()).await;
+    tasks.abort_all();
     result
+}
+
+/// Envia o estado do controle (XInput) ao transmissor: a cada mudança e, parado, a cada 100 ms.
+fn spawn_pad_sender(conn: quinn::Connection) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_millis(8));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last: Option<crate::control::Pad> = None;
+        let mut last_sent = std::time::Instant::now();
+        loop {
+            iv.tick().await;
+            let p = crate::remote::read_pad();
+            let p = match (p, last) {
+                (Some(p), _) => p,
+                (None, Some(_)) => crate::control::Pad::default(), // controle desconectado: solta tudo
+                (None, None) => continue,
+            };
+            if Some(p) != last || last_sent.elapsed() >= Duration::from_millis(100) {
+                if conn.send_datagram(bytes::Bytes::copy_from_slice(&p.encode())).is_err() {
+                    return;
+                }
+                last = if p == crate::control::Pad::default() && crate::remote::read_pad().is_none() { None } else { Some(p) };
+                last_sent = std::time::Instant::now();
+            }
+        }
+    })
 }
 
 /// Conta frames num pedaço de HEVC: cada NAL de vídeo com first_slice_segment_in_pic_flag começa um frame.
@@ -441,7 +1077,11 @@ fn count_frames(b: &[u8]) -> u64 {
 
 /// Sincroniza volume/mudo/janela entre o app e o painel dentro do mpv (IPC, JSON por linha).
 /// Nunca termina enquanto funcionar; se o pipe falhar, fica parado sem derrubar a conexão.
-async fn mpv_control(pipe: &str) {
+async fn mpv_control(
+    pipe: &str,
+    mut osd_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ev_tx: tokio::sync::mpsc::UnboundedSender<OverlayEv>,
+) {
     let client = {
         let mut tries = 0;
         loop {
@@ -470,6 +1110,10 @@ async fn mpv_control(pipe: &str) {
             let mut lines = tokio::io::BufReader::new(rd).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if let Some(ev) = overlay_event(&v) {
+                    let _ = ev_tx.send(ev);
+                    continue;
+                }
                 if v["event"] != "property-change" {
                     continue;
                 }
@@ -507,6 +1151,11 @@ async fn mpv_control(pipe: &str) {
     // Escritor: mudanças feitas no app → mpv.
     let mut last_stats = String::new();
     loop {
+        while let Ok(cmd) = osd_rx.try_recv() {
+            if wr.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
+                return std::future::pending().await;
+            }
+        }
         let line = state::VIEW.lock().unwrap().stats.line();
         if line != last_stats {
             let cmd = format!(

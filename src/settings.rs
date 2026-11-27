@@ -1,16 +1,37 @@
-//! Preferências do usuário (idioma e tema), salvas em %APPDATA%\GameStream\settings.json.
+//! Preferências do usuário (idioma, tema, nome e salas recentes), salvas em
+//! %APPDATA%\GameStream\settings.json.
 
 use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
-        Once,
+        LazyLock, Mutex, Once,
     },
 };
 
 static EN: AtomicBool = AtomicBool::new(false);
 static THEME: AtomicU8 = AtomicU8::new(0);
 static INIT: Once = Once::new();
+
+/// Sala em que o usuário já entrou (para reconectar com um clique).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recent {
+    /// Código da sala (ex.: "KX792B", sem hífen).
+    pub code: String,
+    /// Nome do transmissor (ou o endereço, se ele não informou um nome).
+    pub name: String,
+    /// Última vez (segundos desde 1970).
+    pub last: u64,
+}
+
+#[derive(Default)]
+struct Extra {
+    nick: String,
+    recent: Vec<Recent>,
+}
+
+static EXTRA: LazyLock<Mutex<Extra>> = LazyLock::new(|| Mutex::new(Extra::default()));
+const MAX_RECENT: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
@@ -77,11 +98,42 @@ fn init() {
         EN.store(en, Ordering::Relaxed);
         let theme = Theme::from_id(saved["theme"].as_str().unwrap_or("default"));
         THEME.store(Theme::ALL.iter().position(|t| *t == theme).unwrap_or(0) as u8, Ordering::Relaxed);
+        let mut x = EXTRA.lock().unwrap();
+        x.nick = crate::control::clean_name(saved["nick"].as_str().unwrap_or(""));
+        x.recent = saved["recent"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|r| {
+                        Some(Recent {
+                            code: r["code"].as_str()?.to_string(),
+                            name: r["name"].as_str().unwrap_or("").to_string(),
+                            last: r["last"].as_u64().unwrap_or(0),
+                        })
+                    })
+                    .take(MAX_RECENT)
+                    .collect()
+            })
+            .unwrap_or_default();
     });
 }
 
 fn save() {
-    let v = serde_json::json!({ "lang": if is_en() { "en" } else { "pt" }, "theme": theme().id() });
+    let (nick, recent) = {
+        let x = EXTRA.lock().unwrap();
+        let recent: Vec<serde_json::Value> = x
+            .recent
+            .iter()
+            .map(|r| serde_json::json!({ "code": r.code, "name": r.name, "last": r.last }))
+            .collect();
+        (x.nick.clone(), recent)
+    };
+    let v = serde_json::json!({
+        "lang": if is_en() { "en" } else { "pt" },
+        "theme": theme().id(),
+        "nick": nick,
+        "recent": recent,
+    });
     let p = path();
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -108,5 +160,61 @@ pub fn theme() -> Theme {
 pub fn set_theme(t: Theme) {
     init();
     THEME.store(Theme::ALL.iter().position(|x| *x == t).unwrap_or(0) as u8, Ordering::Relaxed);
+    save();
+}
+
+/// Nome exibido no chat e para quem você transmite. Padrão: o nome do usuário do Windows.
+pub fn nick() -> String {
+    init();
+    let n = EXTRA.lock().unwrap().nick.clone();
+    if !n.is_empty() {
+        return n;
+    }
+    let user = crate::control::clean_name(&std::env::var("USERNAME").unwrap_or_default());
+    if user.is_empty() { crate::i18n::t("Jogador").to_string() } else { user }
+}
+
+/// Nome digitado pelo usuário (vazio = usar o padrão).
+pub fn nick_raw() -> String {
+    init();
+    EXTRA.lock().unwrap().nick.clone()
+}
+
+pub fn set_nick(n: &str) {
+    init();
+    let n = crate::control::clean_name(n);
+    {
+        let mut x = EXTRA.lock().unwrap();
+        if x.nick == n {
+            return;
+        }
+        x.nick = n;
+    }
+    save();
+}
+
+pub fn recent() -> Vec<Recent> {
+    init();
+    EXTRA.lock().unwrap().recent.clone()
+}
+
+/// Registra (ou atualiza) uma sala recente; a mais nova fica no topo.
+pub fn add_recent(code: &str, name: &str) {
+    init();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    {
+        let mut x = EXTRA.lock().unwrap();
+        let old_name = x.recent.iter().find(|r| r.code == code).map(|r| r.name.clone());
+        x.recent.retain(|r| r.code != code);
+        let name = if name.is_empty() { old_name.unwrap_or_default() } else { name.to_string() };
+        x.recent.insert(0, Recent { code: code.to_string(), name, last: now });
+        x.recent.truncate(MAX_RECENT);
+    }
+    save();
+}
+
+pub fn remove_recent(code: &str) {
+    init();
+    EXTRA.lock().unwrap().recent.retain(|r| r.code != code);
     save();
 }

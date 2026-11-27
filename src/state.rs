@@ -1,6 +1,19 @@
 //! Estado compartilhado entre o backend (tokio) e a interface (egui).
 
-use std::sync::{LazyLock, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
+
+/// Alguém na transmissão (transmissor ou espectador), como todos veem na lista "Assistindo agora".
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Member {
+    pub id: String,
+    pub name: String,
+    pub host: bool,
+    /// Controle remoto liberado (bits CTL_PAD | CTL_KBM): mostra quem está jogando.
+    pub ctl: u8,
+}
 
 #[derive(Default, Clone)]
 pub struct HostStatus {
@@ -10,10 +23,14 @@ pub struct HostStatus {
     pub mbps: f64,
     /// Bitrate alvo atual do encoder (muda sozinho no modo automático).
     pub bitrate: u32,
-    /// Espectadores conectados: (chave para remover, descrição).
-    pub viewers: Vec<(String, String)>,
-    /// Sala de espera: (id, endereço).
+    /// Espectadores conectados, com as estatísticas de cada um.
+    pub viewers: Vec<ViewerRow>,
+    /// Sala de espera: (id, "nome (endereço)").
     pub pending: Vec<(u64, String)>,
+    /// Chat e reações da transmissão (mais antigos primeiro).
+    pub chat: Vec<crate::control::ChatMsg>,
+    /// Avatares (PNG) por id ("h" = você).
+    pub avatars: HashMap<String, Arc<Vec<u8>>>,
     pub invite: Option<String>,
     /// Endereços pelos quais os espectadores podem se conectar (LAN, IPv6, UPnP...).
     pub reach: Vec<String>,
@@ -24,6 +41,25 @@ pub struct HostStatus {
     /// Código da sala no servidor de encontro (ex.: "KX7-92B") e se ela está conectada.
     pub room: Option<String>,
     pub room_online: bool,
+}
+
+/// Um espectador conectado, visto pelo transmissor.
+#[derive(Default, Clone, PartialEq)]
+pub struct ViewerRow {
+    /// Chave para remover/dar controle (endereço completo).
+    pub key: String,
+    /// Id na lista de quem está assistindo (para o avatar).
+    pub id: String,
+    pub name: String,
+    pub ip: String,
+    pub ping_ms: u32,
+    /// Perda de pacotes (%) nos últimos 2 segundos.
+    pub loss: f64,
+    /// Mbps enviados a este espectador.
+    pub mbps: f64,
+    /// Controle remoto pedido pelo espectador e liberado pelo transmissor (bits CTL_PAD/CTL_KBM).
+    pub wants: u8,
+    pub granted: u8,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -45,6 +81,26 @@ pub struct ViewStatus {
     pub stats: ViewStats,
     /// Código de resposta (GS-R-...) exibido quando a conexão direta não responde.
     pub reply_code: Option<String>,
+    /// Nome do transmissor (informado por ele ao conectar).
+    pub host_name: String,
+    /// Chat e reações da transmissão.
+    pub chat: Vec<crate::control::ChatMsg>,
+    /// A conexão caiu e o app está tentando voltar sozinho (texto com a tentativa atual).
+    pub reconnecting: Option<String>,
+    /// Controle remoto: pedido feito por este espectador e o que o transmissor liberou (bits).
+    pub ctl_asked: u8,
+    pub ctl_granted: u8,
+    /// Modo de controle por teclado e mouse ligado (F8).
+    pub kbm_active: bool,
+    /// Controle (gamepad) detectado neste PC.
+    pub pad_found: bool,
+    /// O transmissor tem uma versão com chat e controle remoto.
+    pub has_control: bool,
+    /// Quem está na transmissão (o transmissor primeiro) e os avatares por id.
+    pub roster: Vec<Member>,
+    pub avatars: HashMap<String, Arc<Vec<u8>>>,
+    /// O seu id na lista.
+    pub my_id: String,
 }
 
 /// Números da transmissão para quem assiste (atualizados a cada segundo).
@@ -109,6 +165,14 @@ pub fn host<R>(f: impl FnOnce(&mut HostStatus) -> R) -> R {
 
 pub fn view<R>(f: impl FnOnce(&mut ViewStatus) -> R) -> R {
     f(&mut VIEW.lock().unwrap())
+}
+
+/// Guarda uma mensagem de chat (no máximo as últimas 200).
+pub fn push_chat(list: &mut Vec<crate::control::ChatMsg>, m: crate::control::ChatMsg) {
+    list.push(m);
+    if list.len() > 200 {
+        list.drain(..list.len() - 200);
+    }
 }
 
 pub fn view_phase(phase: ViewPhase, text: impl Into<String>) {

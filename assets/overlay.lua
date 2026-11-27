@@ -4,6 +4,7 @@
 --   * Botão do meio / Backspace: restaura o tamanho original.
 --   * Duplo clique / F: tela cheia.
 --   * I: fixa as estatísticas (ping, FPS, perda, Mbps) no canto da tela.
+--   * Enter: escrever no chat · 1 a 6: reações (aparecem para todos na hora).
 --   * Painel no canto inferior direito (aparece ao mexer o mouse): som, volume, zoom, tela cheia.
 -- O volume é guardado em user-data/gs/* e o GameStream (que toca o áudio) acompanha pela IPC.
 
@@ -132,10 +133,10 @@ local function render(show)
     end
     overlay.res_x, overlay.res_y = d.w, d.h
     if not show then
-        -- Só as estatísticas fixas no canto superior esquerdo.
+        -- Só as estatísticas fixas no canto superior direito (o esquerdo é dos avatares).
         buttons = {}
         local tw = math.floor(stats:len() * 8.2) + 24
-        overlay.data = rect(12, 12, tw, 34, C_BG, 0x40) .. "\n" .. text(24, 29, stats, 16, C_TXT, 4)
+        overlay.data = rect(d.w - tw - 12, 12, tw, 34, C_BG, 0x40) .. "\n" .. text(d.w - tw, 29, stats, 16, C_TXT, 4)
         overlay:update()
         return
     end
@@ -191,7 +192,9 @@ local function render(show)
     end
     if zpct > 100 then
         ass[#ass + 1] = text(x0 + total, above, L("Arraste para mover  ·  botão do meio restaura", "Drag to pan  ·  middle button resets"), 15, C_DIM, 6)
+        above = above - 22
     end
+    ass[#ass + 1] = text(x0 + total, above, L("Enter: chat  ·  1 a 6: reações", "Enter: chat  ·  1 to 6: reactions"), 15, C_DIM, 6)
     overlay.data = table.concat(ass, "\n")
     overlay:update()
 end
@@ -314,3 +317,196 @@ if has_audio then
     mp.add_forced_key_binding("0", "gs_vol_up", function() set_volume(volume + 0.05); last_move = mp.get_time(); refresh() end, { repeatable = true })
 end
 mp.observe_property("osd-dimensions", "native", function() refresh() end)
+
+-- ---------- chat, reações, lista de quem assiste e status (vêm do GameStream) ----------
+
+local social = mp.create_osd_overlay("ass-events")
+social.z = 10
+local REACTIONS = { "👍", "😂", "🔥", "❤", "😮", "GG" }
+local chat_lines = {} -- { from, text, t }
+local reacts = {}     -- { r, from, t, x }
+local status_text = ""
+local typing = false
+local CHAT_SECS = 15
+
+-- Texto vindo de outras pessoas: sem comandos ASS.
+local function esc(s)
+    s = tostring(s or "")
+    -- Barra invertida + espaço de largura zero: não forma comandos (\N, \h...).
+    s = s:gsub("\\", "\\\226\128\139"):gsub("{", "\\{"):gsub("}", "\\}"):gsub("\n", " ")
+    return s
+end
+
+mp.register_script_message("gs-chat", function(from, msg)
+    chat_lines[#chat_lines + 1] = { from = from or "", text = msg or "", t = mp.get_time() }
+    if #chat_lines > 8 then table.remove(chat_lines, 1) end
+end)
+mp.register_script_message("gs-react", function(from, r)
+    if #reacts < 40 then
+        reacts[#reacts + 1] = { r = r or "", from = from or "", t = mp.get_time(), x = math.random() }
+    end
+end)
+mp.register_script_message("gs-status", function(s) status_text = s or "" end)
+-- Avatares de quem está na sala (vêm do GameStream como JSON). Fotos: imagens BGRA desenhadas com
+-- overlay-add; quem não tem foto ganha um círculo colorido com a inicial.
+local utils = require("mp.utils")
+local members = {}
+local extra_members, members_bottom = 0, 0
+local MAX_SHOWN = 10
+local used_overlays = 0
+
+local function circle(cx, cy, r, c, alpha)
+    local k = r * 0.5523
+    return string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c%s\\1a&H%02X&\\p1}m %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d{\\p0}",
+        c, alpha or 0,
+        cx, cy - r,
+        cx + k, cy - r, cx + r, cy - k, cx + r, cy,
+        cx + r, cy + k, cx + k, cy + r, cx, cy + r,
+        cx - k, cy + r, cx - r, cy + k, cx - r, cy,
+        cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+end
+
+local function ring(cx, cy, r, c)
+    local k = r * 0.5523
+    return string.format("{\\an7\\pos(0,0)\\bord2.5\\shad0\\1a&HFF&\\3c%s\\p1}m %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d b %d %d %d %d %d %d{\\p0}",
+        c,
+        cx, cy - r,
+        cx + k, cy - r, cx + r, cy - k, cx + r, cy,
+        cx + r, cy + k, cx + k, cy + r, cx, cy + r,
+        cx - k, cy + r, cx - r, cy + k, cx - r, cy,
+        cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+end
+
+local function name_color(name)
+    local h = 5381
+    for i = 1, #name do h = (h * 33 + name:byte(i)) % 4294967296 end
+    local palette = { col(124, 92, 255), col(232, 96, 140), col(64, 170, 230), col(70, 190, 120), col(240, 160, 60), col(150, 110, 220), col(60, 180, 180) }
+    return palette[(h % #palette) + 1]
+end
+
+mp.register_script_message("gs-members", function(json)
+    local list = utils.parse_json(json or "[]") or {}
+    for i = 1, used_overlays do mp.commandv("overlay-remove", tostring(i)) end
+    used_overlays = 0
+    members = {}
+    local y = 16
+    for i, m in ipairs(list) do
+        if i > MAX_SHOWN then break end
+        local size = tonumber(m.size) or 40
+        local e = {
+            id = m.id, name = m.name or "?", host = m.host == true, ctl = tonumber(m.ctl) or 0,
+            size = size, x = 16, y = y, color = name_color(m.name or "?"),
+            initial = (m.name or "?"):match("[%z\1-\127\194-\244][\128-\191]*") or "?",
+        }
+        if type(m.file) == "string" then
+            e.file = m.file
+            used_overlays = used_overlays + 1
+            mp.commandv("overlay-add", tostring(used_overlays), tostring(e.x), tostring(e.y), m.file, "0", "bgra",
+                tostring(size), tostring(size), tostring(size * 4))
+        end
+        members[#members + 1] = e
+        y = y + size + 8
+    end
+    extra_members = math.max(0, #list - MAX_SHOWN)
+    members_bottom = y
+end)
+
+local function render_social()
+    local d = dims()
+    if not d then return end
+    social.res_x, social.res_y = d.w, d.h
+    local now = mp.get_time()
+    local ass = {}
+
+    -- Status (reconectando, controle remoto) no topo, centralizado.
+    if status_text ~= "" then
+        ass[#ass + 1] = string.format("{\\an8\\pos(%d,%d)\\fs18\\fnSegoe UI\\b1\\bord3\\shad0\\1c%s\\3c%s}%s",
+            d.w / 2, 18, C_TXT, C_BG, status_text)
+    end
+
+    -- Quem está na sala: coluna de avatares (passe o mouse para ver o nome).
+    for _, m in ipairs(members) do
+        local cx, cy, r = m.x + m.size / 2, m.y + m.size / 2, m.size / 2
+        if not m.file then
+            ass[#ass + 1] = circle(cx, cy, r, m.color, 0)
+            ass[#ass + 1] = string.format("{\\an5\\pos(%d,%d)\\fs%d\\fnSegoe UI\\b1\\bord0\\shad0\\1c%s}%s",
+                cx, cy, math.floor(m.size * 0.45), C_TXT, esc(m.initial))
+        end
+        if m.host or m.ctl > 0 then
+            -- Anel: vermelho = transmitindo, verde = jogando (controle remoto).
+            ass[#ass + 1] = ring(cx, cy, r + 2, m.host and col(232, 64, 72) or col(70, 200, 120))
+        end
+        if mouse.hover and (mouse.x - cx) ^ 2 + (mouse.y - cy) ^ 2 <= (r + 2) ^ 2 then
+            local label = esc(m.name)
+            if m.host then label = label .. L("  ·  transmitindo", "  ·  streaming") end
+            if m.ctl > 0 then label = label .. L("  ·  🎮 jogando", "  ·  🎮 playing") end
+            ass[#ass + 1] = string.format("{\\an4\\pos(%d,%d)\\fs17\\fnSegoe UI\\b1\\bord4\\shad0\\1c%s\\3c%s}%s",
+                m.x + m.size + 12, cy, C_TXT, C_BG, label)
+        end
+    end
+    if extra_members > 0 then
+        ass[#ass + 1] = string.format("{\\an7\\pos(%d,%d)\\fs15\\fnSegoe UI\\b1\\bord2\\shad0\\3c&H000000&\\1c%s}+%d",
+            16, members_bottom + 4, C_TXT, extra_members)
+    end
+
+    -- Chat no canto inferior esquerdo (some depois de alguns segundos; fica visível enquanto digita).
+    local y = typing and (d.h - 70) or (d.h - 24)
+    for i = #chat_lines, 1, -1 do
+        local m = chat_lines[i]
+        local age = now - m.t
+        if typing or age < CHAT_SECS then
+            local a = 0
+            if not typing and age > CHAT_SECS - 3 then a = math.floor((age - (CHAT_SECS - 3)) / 3 * 255) end
+            ass[#ass + 1] = string.format(
+                "{\\an1\\pos(%d,%d)\\fs19\\fnSegoe UI\\bord2\\shad1\\3c&H000000&\\alpha&H%02X&}{\\b1\\1c%s}%s:{\\b0\\1c%s} %s",
+                16, y, math.min(255, a), C_ACCENT, esc(m.from), C_TXT, esc(m.text))
+            y = y - 28
+        end
+    end
+
+    -- Reações subindo pelo lado direito.
+    local keep = {}
+    for _, r in ipairs(reacts) do
+        local age = now - r.t
+        if age < 3 then
+            keep[#keep + 1] = r
+            local ry = d.h - 110 - age * 170
+            local rx = d.w - 260 + r.x * 160
+            local a = age > 2 and math.floor((age - 2) * 255) or 0
+            local font = (r.r == "GG") and "\\fnSegoe UI\\b1\\fs44" or "\\fnSegoe UI Emoji\\fs56"
+            ass[#ass + 1] = string.format("{\\an2\\pos(%d,%d)%s\\bord2\\shad1\\3c&H000000&\\1c%s\\alpha&H%02X&}%s",
+                rx, ry, font, C_TXT, a, esc(r.r))
+            ass[#ass + 1] = string.format("{\\an8\\pos(%d,%d)\\fs14\\fnSegoe UI\\bord1\\shad0\\3c&H000000&\\1c%s\\alpha&H%02X&}%s",
+                rx, ry + 4, C_DIM, a, esc(r.from))
+        end
+    end
+    reacts = keep
+
+    social.data = table.concat(ass, "\n")
+    social:update()
+end
+
+mp.add_periodic_timer(1 / 30, render_social)
+
+-- Enter: caixa de texto do chat (mpv 0.38+). Esc cancela.
+local input_ok, input = pcall(require, "mp.input")
+local function open_chat()
+    if not input_ok or typing then return end
+    typing = true
+    input.get({
+        prompt = L("Mensagem: ", "Message: "),
+        submit = function(t)
+            if t and t:match("%S") then mp.commandv("script-message", "gs-out-chat", t) end
+            input.terminate()
+        end,
+        closed = function() typing = false end,
+    })
+end
+mp.add_forced_key_binding("ENTER", "gs_chat", open_chat)
+mp.add_forced_key_binding("KP_ENTER", "gs_chat_kp", open_chat)
+for i, r in ipairs(REACTIONS) do
+    mp.add_forced_key_binding(tostring(i), "gs_react_" .. i, function()
+        if typing then return end
+        mp.commandv("script-message", "gs-out-react", r)
+    end)
+end

@@ -1,6 +1,6 @@
 //! Interface gráfica (egui): aba Transmitir e aba Assistir.
 
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -207,6 +207,112 @@ fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
         });
 }
 
+/// Cor estável para o avatar padrão (a partir do nome).
+fn name_color(name: &str) -> Color32 {
+    let h = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+    let hue = (h % 360) as f32 / 360.0;
+    egui::ecolor::Hsva::new(hue, 0.55, 0.75, 1.0).into()
+}
+
+/// Avatar redondo: a foto, ou a inicial do nome sobre uma cor.
+fn avatar_circle(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, name: &str, size: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    match tex {
+        Some(t) => {
+            egui::Image::new(t).rounding(size / 2.0).paint_at(ui, rect);
+        }
+        None => {
+            ui.painter().circle_filled(rect.center(), size / 2.0, name_color(name));
+            let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                initial,
+                egui::FontId::proportional(size * 0.5),
+                Color32::WHITE,
+            );
+        }
+    }
+    resp
+}
+
+/// Texturas dos avatares (recriadas só quando a imagem muda).
+#[derive(Default)]
+struct AvatarCache {
+    tex: HashMap<String, (usize, egui::TextureHandle)>,
+}
+
+impl AvatarCache {
+    fn get(&mut self, ctx: &egui::Context, key: &str, png: Option<&Arc<Vec<u8>>>) -> Option<egui::TextureHandle> {
+        let png = png?;
+        let stamp = Arc::as_ptr(png) as usize ^ png.len();
+        if let Some((s, t)) = self.tex.get(key) {
+            if *s == stamp {
+                return Some(t.clone());
+            }
+        }
+        let (size, rgba) = crate::avatar::decode_rgba(png)?;
+        let img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let t = ctx.load_texture(format!("avatar-{key}"), img, egui::TextureOptions::LINEAR);
+        self.tex.insert(key.to_string(), (stamp, t.clone()));
+        Some(t)
+    }
+}
+
+/// Lista de mensagens do chat com avatar, mais o campo de texto e as reações.
+/// Devolve Some(texto) para enviar ou a reação clicada (como "react:🔥").
+fn chat_box(
+    ui: &mut egui::Ui,
+    cache: &mut AvatarCache,
+    ns: &str,
+    chat: &[crate::control::ChatMsg],
+    avatars: &HashMap<String, Arc<Vec<u8>>>,
+    input: &mut String,
+) -> Option<String> {
+    let mut out = None;
+    egui::Frame::none().fill(pal().input).rounding(pal().radius * 0.8).inner_margin(8.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).stick_to_bottom(true).show(ui, |ui| {
+            if chat.is_empty() {
+                hint(ui, crate::i18n::t("Nenhuma mensagem ainda. As mensagens e reações aparecem também em cima do vídeo, para todos."));
+            }
+            for m in chat.iter().rev().take(80).rev() {
+                ui.horizontal_wrapped(|ui| {
+                    let tex = cache.get(ui.ctx(), &format!("{ns}:{}", m.id), avatars.get(&m.id));
+                    avatar_circle(ui, tex.as_ref(), &m.from, 20.0);
+                    ui.label(RichText::new(&m.from).strong().color(pal().accent));
+                    if m.react {
+                        ui.label(RichText::new(&m.text).size(18.0));
+                    } else {
+                        ui.label(&m.text);
+                    }
+                });
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        let edit = ui.add(
+            egui::TextEdit::singleline(input)
+                .char_limit(200)
+                .hint_text(crate::i18n::t("Escreva uma mensagem e tecle Enter"))
+                .desired_width(ui.available_width() - 80.0),
+        );
+        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.button(crate::i18n::t("Enviar")).clicked() || enter) && !input.trim().is_empty() {
+            out = Some(std::mem::take(input));
+            edit.request_focus();
+        }
+    });
+    ui.horizontal(|ui| {
+        for r in crate::control::REACTIONS {
+            if ui.add(egui::Button::new(RichText::new(r).size(18.0)).min_size(egui::vec2(40.0, 30.0))).clicked() {
+                out = Some(format!("react:{r}"));
+            }
+        }
+    });
+    out
+}
+
 // ---------- app ----------
 
 #[derive(PartialEq, Clone, Copy)]
@@ -278,6 +384,15 @@ struct App {
     view_task: Option<Task>,
     reply_input: String,
     reply_msg: Option<(bool, String)>,
+    // chat, perfil e controle remoto
+    chat_input: String,
+    avatars: AvatarCache,
+    profile_open: bool,
+    nick_edit: String,
+    profile_msg: Option<(bool, String)>,
+    my_avatar: Option<Arc<Vec<u8>>>,
+    want_pad: bool,
+    want_kbm: bool,
 }
 
 impl App {
@@ -321,6 +436,14 @@ impl App {
             view_task: None,
             reply_input: String::new(),
             reply_msg: None,
+            chat_input: String::new(),
+            avatars: AvatarCache::default(),
+            profile_open: false,
+            nick_edit: crate::settings::nick_raw(),
+            profile_msg: None,
+            my_avatar: crate::avatar::load(),
+            want_pad: true,
+            want_kbm: true,
         };
         a.refresh();
         crate::updater::check_in_background();
@@ -777,6 +900,7 @@ impl App {
                 });
             }
 
+            let avatars = &mut self.avatars;
             card(ui, crate::i18n::t("Espectadores conectados"), |ui| {
                 if st.preview_open {
                     ui.label(RichText::new(crate::i18n::t("🖥  Pré-visualização local (sem áudio)")).color(pal().muted));
@@ -784,15 +908,68 @@ impl App {
                 if st.viewers.is_empty() {
                     hint(ui, crate::i18n::t("Nenhum espectador conectado. Compartilhe o convite e a senha."));
                 }
-                for (key, label) in &st.viewers {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("👤  {label}"));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button(crate::i18n::t("Remover")).on_hover_text(crate::i18n::t("Desconecta e bloqueia até o fim da transmissão")).clicked() {
-                                host::kick(key);
-                            }
+                let warn = Color32::from_rgb(255, 190, 90);
+                for v in &st.viewers {
+                    egui::Frame::none().fill(pal().input).rounding(pal().radius * 0.8).inner_margin(8.0).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let tex = avatars.get(ui.ctx(), &format!("h:{}", v.id), st.avatars.get(&v.id));
+                            avatar_circle(ui, tex.as_ref(), &v.name, 34.0);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&v.name).strong());
+                                    if v.name != v.ip {
+                                        ui.label(RichText::new(&v.ip).small().color(pal().muted));
+                                    }
+                                });
+                                let loss_col = if v.loss >= 2.0 { warn } else { pal().muted };
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("ping {} ms", v.ping_ms)).small().color(pal().muted));
+                                    ui.label(RichText::new(crate::tr!("perda {:.1}%", "loss {:.1}%", v.loss)).small().color(loss_col));
+                                    ui.label(RichText::new(format!("{:.1} Mbps", v.mbps)).small().color(pal().muted));
+                                });
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button(crate::i18n::t("Remover")).on_hover_text(crate::i18n::t("Desconecta e bloqueia até o fim da transmissão")).clicked() {
+                                    host::kick(&v.key);
+                                }
+                                if v.granted != 0 {
+                                    if ui.small_button(crate::i18n::t("Revogar controle")).clicked() {
+                                        host::set_control(&v.key, 0);
+                                    }
+                                } else if v.wants != 0 {
+                                    if ui
+                                        .add(egui::Button::new(RichText::new(crate::i18n::t("Permitir")).strong().color(Color32::WHITE)).fill(pal().ok))
+                                        .on_hover_text(crate::i18n::t("Deixa este espectador jogar no seu PC com o que ele pediu"))
+                                        .clicked()
+                                    {
+                                        host::set_control(&v.key, v.wants);
+                                    }
+                                }
+                            });
                         });
+                        if v.granted != 0 {
+                            ui.label(RichText::new(crate::tr!("🎮 Jogando com: {}", "🎮 Playing with: {}", crate::control::ctl_desc(v.granted))).small().color(pal().ok));
+                        } else if v.wants != 0 {
+                            ui.label(RichText::new(crate::tr!("🎮 Pediu para jogar ({})", "🎮 Asked to play ({})", crate::control::ctl_desc(v.wants))).small().color(warn));
+                        }
                     });
+                    ui.add_space(4.0);
+                }
+                if st.viewers.iter().any(|v| v.granted != 0) {
+                    if ui.button(crate::i18n::t("⛔  Revogar o controle de todos")).clicked() {
+                        host::revoke_all_control();
+                    }
+                    hint(ui, crate::i18n::t("Quem joga usa o seu PC: teclado e mouse dele são enviados ao jogo em primeiro plano. Revogue a qualquer momento."));
+                }
+            });
+
+            card(ui, crate::i18n::t("Chat"), |ui| {
+                if let Some(msg) = chat_box(ui, &mut self.avatars, "h", &st.chat, &st.avatars, &mut self.chat_input) {
+                    match msg.strip_prefix("react:") {
+                        Some(r) => host::send_react(r),
+                        None => host::send_chat(&msg),
+                    }
                 }
             });
         }
@@ -834,6 +1011,40 @@ impl App {
             });
         });
 
+        if !running {
+            let recent = crate::settings::recent();
+            if !recent.is_empty() {
+                let mut connect_to: Option<String> = None;
+                card(ui, crate::i18n::t("Salas recentes"), |ui| {
+                    for r in &recent {
+                        ui.horizontal(|ui| {
+                            avatar_circle(ui, None, &r.name, 26.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(if r.name.is_empty() { crate::room::display(&r.code) } else { r.name.clone() }).strong());
+                                ui.label(RichText::new(format!("{}  ·  {}", crate::room::display(&r.code), ago(r.last))).small().color(pal().muted));
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("✕").on_hover_text(crate::i18n::t("Remover da lista")).clicked() {
+                                    crate::settings::remove_recent(&r.code);
+                                }
+                                if ui
+                                    .add(egui::Button::new(RichText::new(crate::i18n::t("Entrar")).strong().color(Color32::WHITE)).fill(pal().accent))
+                                    .clicked()
+                                {
+                                    connect_to = Some(crate::room::display(&r.code));
+                                }
+                            });
+                        });
+                    }
+                    hint(ui, crate::i18n::t("Funciona enquanto a pessoa estiver transmitindo (o código da sala não muda)."));
+                });
+                if let Some(code) = connect_to {
+                    self.invite = code;
+                    self.start_view();
+                }
+            }
+        }
+
         if vs.phase == ViewPhase::Error && !running {
             error_box(ui, &vs.text);
         }
@@ -841,8 +1052,13 @@ impl App {
             card(ui, "", |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new(crate::i18n::t("Conectando...")).size(17.0).strong());
+                    let title = if vs.reconnecting.is_some() { crate::i18n::t("Reconectando...") } else { crate::i18n::t("Conectando...") };
+                    ui.label(RichText::new(title).size(17.0).strong());
                 });
+                if let Some(r) = &vs.reconnecting {
+                    ui.label(RichText::new(r).color(pal().muted));
+                    hint(ui, crate::i18n::t("A janela do vídeo continua aberta e volta sozinha quando a conexão voltar (até 3 minutos)."));
+                }
                 if !vs.text.is_empty() && vs.text != crate::i18n::t("Conectando...") && vs.reply_code.is_none() {
                     ui.label(RichText::new(&vs.text).color(pal().muted));
                 }
@@ -875,7 +1091,12 @@ impl App {
         card(ui, "", |ui| {
             ui.horizontal(|ui| {
                 pill(ui, crate::i18n::t("CONECTADO"), pal().ok);
-                ui.label(RichText::new(&vs.peer).strong());
+                if vs.host_name.is_empty() {
+                    ui.label(RichText::new(&vs.peer).strong());
+                } else {
+                    ui.label(RichText::new(&vs.host_name).strong());
+                    ui.label(RichText::new(&vs.peer).small().color(pal().muted));
+                }
             });
             if vs.verified {
                 ui.label(crate::tr!("🔒 Conexão criptografada · identidade do transmissor verificada · código {}", "🔒 Encrypted connection · streamer identity verified · code {}", vs.code));
@@ -925,6 +1146,93 @@ impl App {
             }
         });
 
+        if !vs.roster.is_empty() {
+            let avatars = &mut self.avatars;
+            card(ui, &crate::tr!("Na sala ({})", "In the room ({})", vs.roster.len()), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for m in &vs.roster {
+                        egui::Frame::none().fill(pal().input).rounding(pal().radius * 2.0).inner_margin(egui::Margin::symmetric(8.0, 4.0)).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let tex = avatars.get(ui.ctx(), &format!("v:{}", m.id), vs.avatars.get(&m.id));
+                                avatar_circle(ui, tex.as_ref(), &m.name, 24.0);
+                                let mut t = RichText::new(&m.name);
+                                if m.id == vs.my_id {
+                                    t = t.strong();
+                                }
+                                ui.label(t);
+                                if m.host {
+                                    ui.label(RichText::new(crate::i18n::t("📡 transmitindo")).small().color(pal().live));
+                                }
+                                if m.ctl != 0 {
+                                    ui.label(RichText::new("🎮").small()).on_hover_text(crate::tr!("Jogando com: {}", "Playing with: {}", crate::control::ctl_desc(m.ctl)));
+                                }
+                                if m.id == vs.my_id {
+                                    ui.label(RichText::new(crate::i18n::t("(você)")).small().color(pal().muted));
+                                }
+                            });
+                        });
+                    }
+                });
+            });
+        }
+
+        if vs.has_control {
+            card(ui, crate::i18n::t("Chat"), |ui| {
+                if let Some(msg) = chat_box(ui, &mut self.avatars, "v", &vs.chat, &vs.avatars, &mut self.chat_input) {
+                    match msg.strip_prefix("react:") {
+                        Some(r) => viewer::send_react(r),
+                        None => viewer::send_chat(&msg),
+                    }
+                }
+            });
+
+            card(ui, crate::i18n::t("Jogar junto (controle remoto)"), |ui| {
+                hint(ui, crate::i18n::t("Opcional: peça para jogar no PC do transmissor com o seu controle ou com teclado e mouse. Ele precisa permitir."));
+                let asked = vs.ctl_asked != 0;
+                ui.add_enabled_ui(!asked, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.want_pad, crate::i18n::t("Controle"));
+                        let (txt, col) = if vs.pad_found {
+                            (crate::i18n::t("(controle detectado)"), pal().ok)
+                        } else {
+                            (crate::i18n::t("(nenhum controle conectado)"), pal().muted)
+                        };
+                        ui.label(RichText::new(txt).small().color(col));
+                    });
+                    ui.checkbox(&mut self.want_kbm, crate::i18n::t("Teclado e mouse"));
+                });
+                ui.horizontal(|ui| {
+                    if !asked {
+                        let ok = self.want_pad || self.want_kbm;
+                        if ui
+                            .add_enabled(ok, egui::Button::new(RichText::new(crate::i18n::t("🎮  Pedir para jogar")).strong().color(Color32::WHITE)).fill(pal().accent))
+                            .clicked()
+                        {
+                            viewer::request_control(self.want_pad, self.want_kbm);
+                        }
+                    } else if ui.button(crate::i18n::t("Parar de jogar")).clicked() {
+                        viewer::request_control(false, false);
+                    }
+                });
+                if asked && vs.ctl_granted == 0 {
+                    ui.label(RichText::new(crate::i18n::t("Aguardando o transmissor permitir...")).color(Color32::from_rgb(255, 190, 90)));
+                }
+                if vs.ctl_granted != 0 {
+                    ui.label(RichText::new(crate::tr!("✔ Liberado: {}", "✔ Allowed: {}", crate::control::ctl_desc(vs.ctl_granted))).strong().color(pal().ok));
+                    if vs.ctl_granted & crate::control::CTL_PAD != 0 {
+                        hint(ui, crate::i18n::t("Seu controle já está ligado ao jogo do transmissor."));
+                    }
+                    if vs.ctl_granted & crate::control::CTL_KBM != 0 {
+                        if vs.kbm_active {
+                            ui.label(RichText::new(crate::i18n::t("⌨ Teclado e mouse ATIVOS no jogo do transmissor. Aperte F8 na janela do vídeo para soltar.")).color(pal().ok));
+                        } else {
+                            hint(ui, crate::i18n::t("Teclado e mouse: clique na janela do vídeo e aperte F8 para começar a jogar (F8 de novo para soltar)."));
+                        }
+                    }
+                }
+            });
+        }
+
         // Volume: a mesma informação do painel dentro da janela do vídeo (sincronizado nos dois sentidos).
         let mut ctl = state::VIEW_CTL.lock().unwrap().clone();
         card(ui, crate::i18n::t("Som"), |ui| {
@@ -960,6 +1268,9 @@ impl App {
                 (crate::i18n::t("Duplo clique / F"), crate::i18n::t("tela cheia")),
                 ("M · 9 · 0", crate::i18n::t("silenciar · diminuir · aumentar volume")),
                 ("I", crate::i18n::t("fixa as estatísticas no canto da tela")),
+                ("Enter", crate::i18n::t("escrever no chat (aparece em cima do vídeo para todos)")),
+                ("1 – 6", crate::i18n::t("reações: 👍 😂 🔥 ❤ 😮 GG")),
+                ("F8", crate::i18n::t("liga/desliga o controle por teclado e mouse (quando o transmissor permitir)")),
             ] {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(k).strong().color(pal().accent));
@@ -1146,6 +1457,77 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
     hint(ui, crate::i18n::t("Considere a velocidade de upload medida no teste de velocidade, não a de download."));
 }
 
+impl App {
+    /// Janela "Seu perfil": nome (até 24 caracteres, emojis permitidos) e foto.
+    fn profile_window(&mut self, ctx: &egui::Context) {
+        if !self.profile_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(crate::i18n::t("Seu perfil"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.horizontal(|ui| {
+                    let nick = if self.nick_edit.trim().is_empty() { crate::settings::nick() } else { self.nick_edit.clone() };
+                    let tex = self.avatars.get(ui.ctx(), "me", self.my_avatar.as_ref());
+                    avatar_circle(ui, tex.as_ref(), &nick, 72.0);
+                    ui.vertical(|ui| {
+                        if ui.button(crate::i18n::t("🖼  Escolher foto...")).clicked() {
+                            let pick = rfd::FileDialog::new()
+                                .set_title(crate::i18n::t("Escolha uma foto de perfil"))
+                                .add_filter(crate::i18n::t("Imagens (PNG, JPG, WebP, GIF)"), &crate::avatar::EXTENSIONS)
+                                .pick_file();
+                            if let Some(f) = pick {
+                                self.profile_msg = Some(match crate::avatar::import(&f) {
+                                    Ok(()) => {
+                                        self.my_avatar = crate::avatar::load();
+                                        (true, crate::i18n::t("Foto atualizada.").into())
+                                    }
+                                    Err(e) => (false, format!("{e:#}")),
+                                });
+                            }
+                        }
+                        if self.my_avatar.is_some() && ui.button(crate::i18n::t("Remover foto")).clicked() {
+                            crate::avatar::remove();
+                            self.my_avatar = None;
+                        }
+                        hint(ui, crate::i18n::t("PNG, JPG, WebP ou GIF, até 8 MB. A foto é cortada em quadrado e reduzida para 128×128."));
+                    });
+                });
+                ui.add_space(8.0);
+                ui.label(crate::i18n::t("Nome (aparece no chat e na lista de quem está assistindo):"));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.nick_edit)
+                            .char_limit(24)
+                            .hint_text(crate::settings::nick())
+                            .desired_width(300.0),
+                    );
+                    ui.label(RichText::new(format!("{}/24", self.nick_edit.chars().count())).small().color(pal().muted));
+                });
+                hint(ui, crate::i18n::t("Até 24 caracteres; pode usar emojis. Vazio = nome do usuário do Windows."));
+                if let Some((ok, msg)) = &self.profile_msg {
+                    ui.label(RichText::new(msg).small().color(if *ok { pal().ok } else { Color32::from_rgb(255, 190, 90) }));
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new(crate::i18n::t("Salvar")).strong().color(Color32::WHITE)).fill(pal().accent)).clicked() {
+                        crate::settings::set_nick(&self.nick_edit);
+                        self.profile_open = false;
+                    }
+                    hint(ui, crate::i18n::t("Vale a partir da próxima conexão ou transmissão."));
+                });
+            });
+        if !open {
+            self.profile_open = false;
+        }
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(250));
@@ -1174,6 +1556,17 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.tab, Tab::View, RichText::new(crate::i18n::t("  Assistir  ")).size(16.0));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.toggle_value(&mut self.show_log, "Log");
+                        let nick = crate::settings::nick();
+                        let tex = self.avatars.get(ui.ctx(), "me", self.my_avatar.as_ref());
+                        let r = ui
+                            .add(egui::Button::new(RichText::new(&nick).strong()).frame(false))
+                            .on_hover_text(crate::i18n::t("Seu perfil: nome e foto que aparecem para os outros"));
+                        let a = avatar_circle(ui, tex.as_ref(), &nick, 26.0);
+                        if r.clicked() || a.interact(egui::Sense::click()).clicked() {
+                            self.profile_open = true;
+                            self.nick_edit = crate::settings::nick_raw();
+                            self.profile_msg = None;
+                        }
                         ui.menu_button("⚙", |ui| {
                             ui.label(RichText::new(crate::i18n::t("Idioma")).small().color(pal().muted));
                             let en = crate::settings::is_en();
@@ -1265,6 +1658,7 @@ impl eframe::App for App {
             });
 
         self.invite_popup(ctx);
+        self.profile_window(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1276,5 +1670,20 @@ impl eframe::App for App {
         }
         // Dá um instante para fechar o UPnP e os players.
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// "há 5 min", "há 2 h", "há 3 dias".
+fn ago(ts: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(ts);
+    let d = now.saturating_sub(ts);
+    if d < 60 {
+        crate::i18n::t("agora").into()
+    } else if d < 3600 {
+        crate::tr!("há {} min", "{} min ago", d / 60)
+    } else if d < 86400 {
+        crate::tr!("há {} h", "{} h ago", d / 3600)
+    } else {
+        crate::tr!("há {} dias", "{} days ago", d / 86400)
     }
 }
