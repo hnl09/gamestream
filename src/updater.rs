@@ -235,6 +235,15 @@ fn ffmpeg_works(cmd: &Path) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// FFmpeg já disponível (pasta do GameStream ou PATH), sem baixar.
+pub fn ffmpeg_present() -> Option<String> {
+    let local = exe_dir().ok()?.join("ffmpeg.exe");
+    if local.exists() && ffmpeg_works(&local) {
+        return Some(local.to_string_lossy().into_owned());
+    }
+    ffmpeg_works(Path::new("ffmpeg")).then(|| "ffmpeg".to_string())
+}
+
 /// Garante um ffmpeg.exe: usa o da pasta do GameStream, o do PATH, ou baixa da release desta versão.
 pub fn ensure_ffmpeg() -> Result<String> {
     let dir = exe_dir()?;

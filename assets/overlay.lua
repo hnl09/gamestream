@@ -14,6 +14,21 @@ local en = mp.get_opt("gs-lang") == "en"
 local function L(pt, eng) return en and eng or pt end
 local has_audio = mode == "viewer"
 
+-- Janelinha de câmera: só o nome de quem é, no canto (sem painel nem atalhos).
+if mode == "cam" then
+    local name = (mp.get_opt("gs-name") or ""):gsub("[{}\\]", "")
+    local ov = mp.create_osd_overlay("ass-events")
+    local function draw()
+        local d = mp.get_property_native("osd-dimensions")
+        if not d or not d.w or d.w <= 0 then return end
+        ov.res_x, ov.res_y = d.w, d.h
+        ov.data = string.format("{\\an1\\pos(8,%d)\\fs15\\fnSegoe UI\\b1\\bord2\\shad0\\3c&H000000&\\1c&HFFFFFF&}%s", d.h - 6, name)
+        ov:update()
+    end
+    mp.observe_property("osd-dimensions", "native", draw)
+    return
+end
+
 local MAX_ZOOM = 3 -- log2: 2^3 = 800%
 local overlay = mp.create_osd_overlay("ass-events")
 local buttons = {}

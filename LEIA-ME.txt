@@ -87,7 +87,12 @@ ASSISTIR
      aperte F8 para começar e F8 de novo para soltar. Controle: requer o
      driver ViGEmBus instalado no PC do transmissor
      (github.com/nefarius/ViGEmBus/releases).
-  6. Se a conexão cair, o aplicativo reconecta sozinho (até 3 minutos) na
+  6. Câmera (opcional): no card "📷 Câmera", escolha a câmera e clique em
+     "Ligar minha câmera". As câmeras de todos aparecem em janelinhas no
+     canto da tela (arraste para mover, feche para esconder).
+  7. Link de um clique: quem transmite clica em "🔗 Copiar link" (ao lado do
+     código da sala) e manda no Discord; quem clica entra direto na sala.
+  8. Se a conexão cair, o aplicativo reconecta sozinho (até 3 minutos) na
      mesma janela de vídeo. As salas em que você entrou ficam em "Salas
      recentes" para entrar de novo com um clique.
      "Áudio recebido" (na aba Assistir) mostra se o som está chegando. Se

@@ -86,7 +86,12 @@ fn pal() -> Palette {
     }
 }
 
-pub fn run() -> eframe::Result<()> {
+/// Abre a interface. `join` = código de sala vindo de um link (entra direto na sala).
+pub fn run(join: Option<String>) -> eframe::Result<()> {
+    if join.is_some() {
+        *crate::link::PENDING.lock().unwrap() = join;
+    }
+    crate::link::register_scheme();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("GameStream")
@@ -100,7 +105,10 @@ pub fn run() -> eframe::Result<()> {
         opts,
         Box::new(|cc| {
             setup_style(&cc.egui_ctx);
-            Ok(Box::new(App::new()))
+            let app = App::new();
+            // Recebe links abertos enquanto o app está aberto.
+            app.rt.spawn(crate::link::serve(cc.egui_ctx.clone()));
+            Ok(Box::new(app))
         }),
     )
 }
@@ -205,6 +213,56 @@ fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
             ui.painter().circle_filled(egui::pos2(rect.left() + 4.0, rect.center().y), 4.0, color.gamma_multiply(a));
             ui.painter().galley(egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0), galley, color);
         });
+}
+
+/// Gráfico de linha simples (últimos minutos). `extra` = segunda série (tracejada), ex.: o alvo.
+fn line_chart(ui: &mut egui::Ui, title: &str, unit: &str, values: &[f32], color: Color32, extra: Option<(&[f32], Color32)>) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 74.0), egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, pal().radius * 0.6, pal().input);
+    let cur = values.last().copied().unwrap_or(0.0);
+    let font = egui::FontId::proportional(12.0);
+    p.text(rect.left_top() + egui::vec2(8.0, 5.0), egui::Align2::LEFT_TOP, title, font.clone(), pal().muted);
+    let cur_txt = if cur >= 10.0 || cur == cur.trunc() { format!("{cur:.0} {unit}") } else { format!("{cur:.1} {unit}") };
+    p.text(rect.right_top() + egui::vec2(-8.0, 5.0), egui::Align2::RIGHT_TOP, cur_txt, font.clone(), color);
+    let max = values
+        .iter()
+        .chain(extra.map(|(e, _)| e).unwrap_or(&[]).iter())
+        .copied()
+        .fold(0.0f32, f32::max)
+        .max(1.0)
+        * 1.15;
+    let plot = egui::Rect::from_min_max(rect.left_top() + egui::vec2(6.0, 22.0), rect.right_bottom() - egui::vec2(6.0, 6.0));
+    p.text(plot.left_top() + egui::vec2(2.0, -1.0), egui::Align2::LEFT_TOP, format!("{max:.0}"), egui::FontId::proportional(9.0), pal().muted);
+    // Janela de tempo: pelo menos 60 amostras (o gráfico já começa largo) e no máximo o histórico.
+    let span = values.len().clamp(60, state::HISTORY);
+    let to_pts = |vals: &[f32]| -> Vec<egui::Pos2> {
+        let vals = &vals[vals.len().saturating_sub(span)..];
+        let n = span.max(2) as f32 - 1.0;
+        let off = span.saturating_sub(vals.len()) as f32;
+        vals.iter()
+            .enumerate()
+            .map(|(i, v)| egui::pos2(plot.left() + (off + i as f32) / n * plot.width(), plot.bottom() - (v / max).clamp(0.0, 1.0) * plot.height()))
+            .collect()
+    };
+    if let Some((e, c)) = extra {
+        let pts = to_pts(e);
+        for seg in pts.windows(2).step_by(2) {
+            p.line_segment([seg[0], seg[1]], Stroke::new(1.0_f32, c));
+        }
+    }
+    let pts = to_pts(values);
+    if pts.len() >= 2 {
+        // Preenchimento sob a linha: um trapézio (convexo) por trecho.
+        for seg in pts.windows(2) {
+            let quad = vec![seg[0], seg[1], egui::pos2(seg[1].x, plot.bottom()), egui::pos2(seg[0].x, plot.bottom())];
+            p.add(egui::Shape::convex_polygon(quad, color.gamma_multiply(0.12), Stroke::NONE));
+        }
+        p.add(egui::Shape::line(pts, Stroke::new(1.6_f32, color)));
+    } else {
+        p.text(plot.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("coletando dados..."), font, pal().muted);
+    }
 }
 
 /// Cor estável para o avatar padrão (a partir do nome).
@@ -406,6 +464,11 @@ struct App {
     /// Salas recentes ao vivo agora (código -> ao vivo) e quando foi a última consulta.
     live_rooms: Arc<std::sync::Mutex<HashMap<String, bool>>>,
     live_checked: Option<std::time::Instant>,
+    /// Sala para entrar assim que a conexão atual terminar (link aberto enquanto assistia outra).
+    join_after_stop: Option<String>,
+    /// Câmeras do PC (listadas em segundo plano) e a escolhida.
+    cam_devices: Arc<std::sync::Mutex<Option<Vec<String>>>>,
+    cam_sel: String,
     /// Preferências já salvas (para gravar só quando algo muda) e quando mudou por último.
     saved_prefs: String,
     prefs_changed: Option<std::time::Instant>,
@@ -469,6 +532,9 @@ impl App {
             live_checked: None,
             saved_prefs: String::new(),
             prefs_changed: None,
+            join_after_stop: None,
+            cam_devices: Arc::new(std::sync::Mutex::new(None)),
+            cam_sel: String::new(),
         };
         a.refresh();
         a.load_prefs();
@@ -840,6 +906,18 @@ impl App {
                     stat(&mut c[2], crate::i18n::t("Taxa de saída"), format!("{:.1} Mbps", st.mbps));
                     stat(&mut c[3], crate::i18n::t("Upload total"), format!("{:.0} Mbps", st.mbps * st.viewers.len() as f64));
                 });
+                egui::CollapsingHeader::new(crate::i18n::t("📈 Gráfico da transmissão (últimos 6 minutos)")).default_open(false).show(ui, |ui| {
+                    let out: Vec<f32> = st.history.iter().map(|s| s.mbps).collect();
+                    let target: Vec<f32> = st.history.iter().map(|s| s.fps).collect();
+                    line_chart(ui, crate::i18n::t("Taxa de saída (linha tracejada: bitrate alvo)"), "Mbps", &out, pal().ok, Some((&target, pal().muted)));
+                });
+                if st.paused {
+                    ui.label(
+                        RichText::new(crate::i18n::t("⏸ Ninguém assistindo: a codificação está pausada para poupar a placa de vídeo. Volta sozinha quando alguém entrar."))
+                            .small()
+                            .color(pal().muted),
+                    );
+                }
                 ui.horizontal(|ui| {
                     hint(ui, &format!("Encoder: {}", st.encoder));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -859,6 +937,19 @@ impl App {
                         ui.label(RichText::new(room).size(26.0).strong().monospace().color(pal().accent));
                         if ui.small_button("📋").on_hover_text(crate::i18n::t("Copiar código da sala")).clicked() {
                             ui.output_mut(|o| o.copied_text = room.clone());
+                        }
+                        if let Some(link) = crate::room::parse_code(room).and_then(|c| crate::link::web_link(&c)) {
+                            if ui
+                                .small_button(crate::i18n::t("🔗 Copiar link"))
+                                .on_hover_text(crate::tr!(
+                                    "Quem clicar no link entra direto na sala (com o GameStream instalado):\n{link}",
+                                    "Whoever clicks the link joins the room directly (with GameStream installed):\n{link}"
+                                ))
+                                .clicked()
+                            {
+                                ui.output_mut(|o| o.copied_text = link.clone());
+                                state::log(crate::tr!("Link copiado: {link}", "Link copied: {link}"));
+                            }
                         }
                         let (txt, col) = if st.room_online {
                             (crate::i18n::t("online"), pal().ok)
@@ -1023,6 +1114,7 @@ impl App {
                     }
                 }
             });
+            self.cam_card(ui, true, st.cam_on, st.cam_error.clone());
         }
     }
 
@@ -1210,6 +1302,21 @@ impl App {
                 });
                 stat(&mut c[3], crate::i18n::t("Taxa recebida"), format!("{:.1} Mbps", s.mbps));
             });
+            egui::CollapsingHeader::new(crate::i18n::t("📈 Gráfico da conexão (últimos 3 minutos)")).default_open(true).show(ui, |ui| {
+                let h: Vec<state::Sample> = vs.history.iter().copied().collect();
+                let col = |f: fn(&state::Sample) -> f32| h.iter().map(f).collect::<Vec<f32>>();
+                let warn = Color32::from_rgb(255, 190, 90);
+                ui.columns(2, |c| {
+                    line_chart(&mut c[0], crate::i18n::t("Ping"), "ms", &col(|s| s.ping), pal().accent, None);
+                    line_chart(&mut c[1], crate::i18n::t("Perda de pacotes"), "%", &col(|s| s.loss), warn, None);
+                });
+                ui.add_space(4.0);
+                ui.columns(2, |c| {
+                    line_chart(&mut c[0], crate::i18n::t("Taxa recebida"), "Mbps", &col(|s| s.mbps), pal().ok, None);
+                    line_chart(&mut c[1], crate::i18n::t("FPS"), "", &col(|s| s.fps), Color32::from_rgb(120, 180, 255), None);
+                });
+                hint(ui, crate::i18n::t("Picos de ping ou de perda que se repetem indicam Wi-Fi ou conexão instável."));
+            });
             // Indicador de áudio recebido: mostra se o som está chegando (e se está em silêncio).
             ui.horizontal(|ui| {
                 ui.label(RichText::new(crate::i18n::t("Áudio recebido:")).small().color(pal().muted));
@@ -1257,6 +1364,9 @@ impl App {
                                 if m.ctl != 0 {
                                     ui.label(RichText::new("🎮").small()).on_hover_text(crate::tr!("Jogando com: {}", "Playing with: {}", crate::control::ctl_desc(m.ctl)));
                                 }
+                                if m.cam {
+                                    ui.label(RichText::new("📷").small()).on_hover_text(crate::i18n::t("Câmera ligada"));
+                                }
                                 if m.id == vs.my_id {
                                     ui.label(RichText::new(crate::i18n::t("(você)")).small().color(pal().muted));
                                 }
@@ -1285,6 +1395,7 @@ impl App {
                     }
                 }
             });
+            self.cam_card(ui, false, vs.cam_on, vs.cam_error.clone());
 
             card(ui, crate::i18n::t("Jogar junto (controle remoto)"), |ui| {
                 hint(ui, crate::i18n::t("Opcional: peça para jogar no PC do transmissor com o seu controle ou com teclado e mouse. Ele precisa permitir."));
@@ -1559,6 +1670,61 @@ fn bitrate_guide(ui: &mut egui::Ui, chosen: u32, friends: &mut u32) {
 }
 
 impl App {
+    /// Card "Câmera": ligar/desligar a sua câmera e mostrar (ou não) as dos outros.
+    fn cam_card(&mut self, ui: &mut egui::Ui, hosting: bool, cam_on: bool, cam_error: Option<String>) {
+        // Lista as câmeras uma vez (o FFmpeg demora ~1 s); "⟳" lista de novo.
+        if self.cam_devices.lock().unwrap().is_none() {
+            *self.cam_devices.lock().unwrap() = Some(Vec::new());
+            let list = self.cam_devices.clone();
+            std::thread::spawn(move || {
+                let found = crate::updater::ffmpeg_present().map(|f| crate::cam::list(&f)).unwrap_or_default();
+                *list.lock().unwrap() = Some(found);
+            });
+        }
+        let devices = self.cam_devices.lock().unwrap().clone().unwrap_or_default();
+        card(ui, crate::i18n::t("📷 Câmera"), |ui| {
+            if cam_on {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::i18n::t("● Sua câmera está ligada")).strong().color(pal().live));
+                    if ui.button(crate::i18n::t("Desligar câmera")).clicked() {
+                        if hosting { host::set_camera(None) } else { viewer::set_camera(None) }
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    let label = if self.cam_sel.is_empty() { crate::i18n::t("Câmera padrão").to_string() } else { self.cam_sel.clone() };
+                    egui::ComboBox::from_id_salt(if hosting { "cam_h" } else { "cam_v" })
+                        .width(ui.available_width() - 190.0)
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.cam_sel, String::new(), crate::i18n::t("Câmera padrão"));
+                            for d in &devices {
+                                ui.selectable_value(&mut self.cam_sel, d.clone(), d);
+                            }
+                        });
+                    if ui.small_button("⟳").on_hover_text(crate::i18n::t("Procurar câmeras de novo")).clicked() {
+                        *self.cam_devices.lock().unwrap() = None;
+                    }
+                    if ui
+                        .add(egui::Button::new(RichText::new(crate::i18n::t("📷 Ligar minha câmera")).strong().color(Color32::WHITE)).fill(pal().accent))
+                        .clicked()
+                    {
+                        let dev = Some(self.cam_sel.clone());
+                        if hosting { host::set_camera(dev) } else { viewer::set_camera(dev) }
+                    }
+                });
+            }
+            if let Some(e) = cam_error {
+                ui.label(RichText::new(format!("⚠ {e}")).small().color(Color32::from_rgb(255, 190, 90)));
+            }
+            let mut show = crate::settings::show_cams();
+            if ui.checkbox(&mut show, crate::i18n::t("Mostrar as câmeras dos outros")).changed() {
+                crate::settings::set_show_cams(show);
+            }
+            hint(ui, crate::i18n::t("As câmeras aparecem em janelinhas no canto da tela (arraste para mover; feche para esconder). Cada câmera usa ~0,35 Mbps. Desligada por padrão."));
+        });
+    }
+
     /// Últimas escolhas da interface (sem a senha), salvas em settings.json.
     fn prefs_json(&self) -> serde_json::Value {
         let audio_sel = match &self.audio_sel {
@@ -1591,6 +1757,7 @@ impl App {
             "muted": self.muted,
             "want_pad": self.want_pad,
             "want_kbm": self.want_kbm,
+            "cam_device": self.cam_sel,
         })
     }
 
@@ -1650,6 +1817,7 @@ impl App {
         self.muted = b("muted", self.muted);
         self.want_pad = b("want_pad", self.want_pad);
         self.want_kbm = b("want_kbm", self.want_kbm);
+        self.cam_sel = p["cam_device"].as_str().unwrap_or("").to_string();
     }
 
     /// Grava as escolhas quando mudam (no máximo uma vez por segundo, para não gravar a cada quadro
@@ -1811,6 +1979,23 @@ impl eframe::App for App {
         if self.auto_update(ctx) {
             return;
         }
+        // Link "entrar na sala": vai para Assistir e conecta (troca de sala se já estiver assistindo).
+        if let Some(code) = crate::link::PENDING.lock().unwrap().take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.tab = Tab::View;
+            if let Some(t) = self.view_task.as_mut().filter(|t| t.running()) {
+                t.stop();
+            }
+            self.join_after_stop = Some(code);
+        }
+        if !self.view_running() {
+            if let Some(code) = self.join_after_stop.take() {
+                state::log(crate::tr!("Entrando na sala {} pelo link...", "Joining room {} from the link...", crate::room::display(&code)));
+                self.invite = crate::room::display(&code);
+                self.start_view();
+            }
+        }
         self.save_prefs_if_changed();
 
         // Abre o popup (e copia o convite) assim que a transmissão fica pronta.
@@ -1858,6 +2043,18 @@ impl eframe::App for App {
                             if ui.radio(en, "English").clicked() {
                                 crate::settings::set_en(true);
                                 ui.close_menu();
+                            }
+                            ui.separator();
+                            let mut snd = crate::settings::sounds();
+                            if ui
+                                .checkbox(&mut snd, crate::i18n::t("🔔 Sons de aviso"))
+                                .on_hover_text(crate::i18n::t("Toca um som quando alguém entra, pede para jogar ou manda mensagem"))
+                                .changed()
+                            {
+                                crate::settings::set_sounds(snd);
+                                if snd {
+                                    crate::sounds::play(crate::sounds::Sound::Join);
+                                }
                             }
                             ui.separator();
                             ui.label(RichText::new(crate::i18n::t("Tema")).small().color(pal().muted));

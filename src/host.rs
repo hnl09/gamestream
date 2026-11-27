@@ -68,7 +68,7 @@ fn roster_json() -> serde_json::Value {
         .lock()
         .unwrap()
         .iter()
-        .map(|e| serde_json::json!({ "id": e.m.id, "name": e.m.name, "host": e.m.host, "ctl": e.m.ctl }))
+        .map(|e| serde_json::json!({ "id": e.m.id, "name": e.m.name, "host": e.m.host, "ctl": e.m.ctl, "cam": e.m.cam }))
         .collect();
     serde_json::json!({ "t": "roster", "list": list })
 }
@@ -98,6 +98,175 @@ struct RemoteSlot {
     granted: Arc<AtomicU8>,
     /// Avisa a tarefa do espectador que a permissão mudou (com um aviso opcional para ele).
     notify: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+}
+
+// ---------- câmeras ----------
+
+/// Pedaço do vídeo de uma câmera (H.264); `key` = começa um quadro-chave.
+#[derive(Clone)]
+struct CamChunk {
+    data: Bytes,
+    key: bool,
+}
+
+/// Câmeras ligadas agora (id de quem é -> canal com o vídeo) e aviso de câmera nova.
+static CAMHUB: std::sync::LazyLock<Mutex<HashMap<String, broadcast::Sender<CamChunk>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static CAM_EVENTS: std::sync::LazyLock<Mutex<Option<broadcast::Sender<String>>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+/// Câmera do transmissor: pedido de parar a atual. FFmpeg e runtime da transmissão atual.
+static HOST_CAM: std::sync::LazyLock<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+static RUNTIME: std::sync::LazyLock<Mutex<Option<(tokio::runtime::Handle, String)>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+
+fn member_name(id: &str) -> String {
+    MEMBERS.lock().unwrap().iter().find(|e| e.m.id == id).map(|e| e.m.name.clone()).unwrap_or_default()
+}
+
+/// Uma câmera começou: cria o canal, marca na lista da sala e avisa quem repassa/mostra.
+fn cam_start(id: &str) -> broadcast::Sender<CamChunk> {
+    let (tx, _) = broadcast::channel(128);
+    CAMHUB.lock().unwrap().insert(id.to_string(), tx.clone());
+    if let Some(e) = MEMBERS.lock().unwrap().iter_mut().find(|e| e.m.id == id) {
+        e.m.cam = true;
+    }
+    publish_roster();
+    if let Some(ev) = CAM_EVENTS.lock().unwrap().as_ref() {
+        let _ = ev.send(id.to_string());
+    }
+    tx
+}
+
+/// Uma câmera parou (os que repassam/mostram terminam quando o canal fecha).
+fn cam_end(id: &str) {
+    CAMHUB.lock().unwrap().remove(id);
+    if let Some(e) = MEMBERS.lock().unwrap().iter_mut().find(|e| e.m.id == id) {
+        e.m.cam = false;
+    }
+    publish_roster();
+}
+
+/// Liga (Some(câmera); vazio = a primeira) ou desliga (None) a câmera de quem transmite.
+pub fn set_camera(device: Option<String>) {
+    if let Some(stop) = HOST_CAM.lock().unwrap().take() {
+        let _ = stop.send(());
+    }
+    let Some(device) = device else { return };
+    let Some((rt, ffmpeg)) = RUNTIME.lock().unwrap().clone() else {
+        state::host(|h| h.cam_error = Some(crate::i18n::t("inicie a transmissão para ligar a câmera").into()));
+        return;
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    *HOST_CAM.lock().unwrap() = Some(tx);
+    rt.spawn(host_cam(ffmpeg, device, rx));
+}
+
+async fn host_cam(ffmpeg: String, device: String, mut stop: tokio::sync::oneshot::Receiver<()>) {
+    let device = if device.is_empty() {
+        let f = ffmpeg.clone();
+        tokio::task::spawn_blocking(move || crate::cam::list(&f)).await.ok().and_then(|l| l.into_iter().next()).unwrap_or_default()
+    } else {
+        device
+    };
+    if device.is_empty() {
+        state::host(|h| h.cam_error = Some(crate::i18n::t("nenhuma câmera encontrada").into()));
+        return;
+    }
+    let mut child = match crate::cam::spawn_capture(&ffmpeg, &device) {
+        Ok(c) => c,
+        Err(e) => {
+            state::host(|h| h.cam_error = Some(format!("{e:#}")));
+            return;
+        }
+    };
+    state::host(|h| {
+        h.cam_on = true;
+        h.cam_error = None;
+    });
+    log(crate::tr!("[câmera] sua câmera está ligada ({device}).", "[camera] your camera is on ({device})."));
+    let tx = cam_start("h");
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut got = false;
+    loop {
+        tokio::select! {
+            n = crate::cam::read_chunk(&mut child, &mut buf) => match n {
+                Some(n) => {
+                    got = true;
+                    let _ = tx.send(CamChunk { data: Bytes::copy_from_slice(&buf[..n]), key: crate::cam::has_sps(&buf[..n]) });
+                }
+                None => break,
+            },
+            _ = &mut stop => break,
+        }
+    }
+    drop(tx);
+    cam_end("h");
+    let _ = child.kill().await;
+    state::host(|h| {
+        h.cam_on = false;
+        if !got {
+            h.cam_error = Some(crate::i18n::t("a câmera não respondeu (pode estar em uso por outro programa)").into());
+        }
+    });
+    log(crate::i18n::t("[câmera] sua câmera foi desligada."));
+}
+
+/// Mostra no PC do transmissor as câmeras ligadas (inclusive a dele, como espelho).
+async fn show_cams_locally() {
+    let Some(mut ev) = CAM_EVENTS.lock().unwrap().as_ref().map(|e| e.subscribe()) else { return };
+    loop {
+        let id = match ev.recv().await {
+            Ok(id) => id,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
+        if id != "h" && !crate::settings::show_cams() {
+            continue;
+        }
+        let Some(mut rx) = CAMHUB.lock().unwrap().get(&id).map(|t| t.subscribe()) else { continue };
+        let name = if id == "h" { crate::settings::nick() } else { member_name(&id) };
+        tokio::spawn(async move {
+            let Ok(mut win) = crate::cam::CamWindow::open(&name) else { return };
+            let mut started = false;
+            loop {
+                match rx.recv().await {
+                    Ok(c) => {
+                        if !started && !c.key {
+                            continue;
+                        }
+                        started = true;
+                        if !win.write(&c.data).await || win.closed() {
+                            return; // a pessoa fechou a janelinha
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => started = false,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+}
+
+/// Repassa a câmera `id` para um espectador (a partir do próximo quadro-chave).
+async fn forward_cam(conn: quinn::Connection, id: String, mut rx: broadcast::Receiver<CamChunk>) -> Result<()> {
+    let mut s = conn.open_uni().await?;
+    let mut hdr = vec![net::STREAM_CAM, id.len() as u8];
+    hdr.extend_from_slice(id.as_bytes());
+    s.write_all(&hdr).await?;
+    let mut started = false;
+    loop {
+        match rx.recv().await {
+            Ok(c) => {
+                if !started && !c.key {
+                    continue;
+                }
+                started = true;
+                s.write_all(&net::frame(&c.data)).await?;
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => started = false,
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    let _ = s.finish();
+    Ok(())
 }
 
 /// Pedido de encerrar a transmissão (comando "stop" no terminal).
@@ -621,6 +790,7 @@ async fn encoder_loop(
     vtx: broadcast::Sender<VideoChunk>,
     bytes_out: Arc<AtomicU64>,
     gfx: bool,
+    viewers: Viewers,
 ) -> Result<()> {
     // Reinícios seguidos por falha de captura (o contador zera quando o encoder fica estável).
     let mut failures: u32 = 0;
@@ -628,6 +798,17 @@ async fn encoder_loop(
     let mut fallback: Option<Capture> = None;
     let mut tip_shown = false;
     loop {
+        // Ninguém assistindo (nem a pré-visualização aberta): pausa a codificação para poupar a placa
+        // de vídeo; volta assim que alguém entra (ele recebe a imagem a partir do primeiro keyframe).
+        if !encoder_needed(&viewers) {
+            log(crate::i18n::t("[encoder] ninguém assistindo: codificação pausada (economiza a placa de vídeo)."));
+            state::host(|h| h.paused = true);
+            while !encoder_needed(&viewers) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            state::host(|h| h.paused = false);
+            log(crate::i18n::t("[encoder] espectador conectado: codificação retomada."));
+        }
         let br = *br_rx.borrow_and_update();
         let cap = fallback.clone().unwrap_or_else(|| cap_rx.borrow_and_update().clone());
         let started = Instant::now();
@@ -703,12 +884,33 @@ async fn encoder_loop(
             _ = br_rx.changed() => {
                 let _ = child.kill().await;
             }
+            _ = idle_for(&viewers, Duration::from_secs(3)) => {
+                let _ = child.kill().await;
+            }
             _ = cap_rx.changed() => {
                 let _ = child.kill().await;
                 // Fonte nova escolhida pelo usuário: volta ao método de captura normal.
                 fallback = None;
                 failures = 0;
             }
+        }
+    }
+}
+
+/// O encoder precisa rodar? (há espectadores ou a pré-visualização está aberta)
+fn encoder_needed(viewers: &Viewers) -> bool {
+    !viewers.lock().unwrap().is_empty() || preview_wanted()
+}
+
+/// Termina quando ninguém precisa do encoder há `dur` (evita parar/religar quando alguém só reconecta).
+async fn idle_for(viewers: &Viewers, dur: Duration) {
+    let mut since: Option<Instant> = None;
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if encoder_needed(viewers) {
+            since = None;
+        } else if since.get_or_insert_with(Instant::now).elapsed() >= dur {
+            return;
         }
     }
 }
@@ -948,9 +1150,16 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     *CHAT.lock().unwrap() = Some(chat_tx.clone());
     let (roster_tx, _) = broadcast::channel::<serde_json::Value>(64);
     *ROSTER.lock().unwrap() = Some(roster_tx);
+    let (cam_ev, _) = broadcast::channel::<String>(32);
+    *CAM_EVENTS.lock().unwrap() = Some(cam_ev);
+    *RUNTIME.lock().unwrap() = Some((tokio::runtime::Handle::current(), o.ffmpeg.clone()));
+    state::host(|h| {
+        h.cam_on = false;
+        h.cam_error = None;
+    });
     let my_avatar = crate::avatar::load();
     *MEMBERS.lock().unwrap() = vec![MemberEntry {
-        m: state::Member { id: "h".into(), name: crate::settings::nick(), host: true, ctl: 0 },
+        m: state::Member { id: "h".into(), name: crate::settings::nick(), host: true, ctl: 0, cam: false },
         avatar: my_avatar.clone(),
     }];
     state::host(|h| {
@@ -966,7 +1175,12 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             loop {
                 match rx.recv().await {
                     Ok(m) if m.ping.is_some() => {} // apontar não entra no histórico do chat
-                    Ok(m) => state::host(|h| state::push_chat(&mut h.chat, m)),
+                    Ok(m) => {
+                        if !m.react && m.id != "h" {
+                            crate::sounds::play(crate::sounds::Sound::Chat);
+                        }
+                        state::host(|h| state::push_chat(&mut h.chat, m));
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
                 }
@@ -993,7 +1207,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             }
         }
     };
-    let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone(), gfx);
+    let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone(), gfx, viewers.clone());
     let vtx_preview = vtx.clone();
 
     let controller = async {
@@ -1060,6 +1274,8 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             };
             state::host(|h| {
                 h.mbps = mbps;
+                let target = h.bitrate as f32;
+                state::push_sample(&mut h.history, state::Sample { mbps: mbps as f32, fps: target, ..Default::default() });
                 h.viewers = list;
             });
         }
@@ -1095,6 +1311,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = accept => Ok(()),
         _ = stats => Ok(()),
         _ = chat_log => Ok(()),
+        _ = show_cams_locally() => Ok(()),
         _ = controller => Ok(()),
         _ = renew => Ok(()),
         _ = stop => Ok(()),
@@ -1107,6 +1324,12 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     BANNED.lock().unwrap().clear();
     *CHAT.lock().unwrap() = None;
     *ROSTER.lock().unwrap() = None;
+    if let Some(stop) = HOST_CAM.lock().unwrap().take() {
+        let _ = stop.send(());
+    }
+    *RUNTIME.lock().unwrap() = None;
+    *CAM_EVENTS.lock().unwrap() = None;
+    CAMHUB.lock().unwrap().clear();
     MEMBERS.lock().unwrap().clear();
     TOKENS.lock().unwrap().clear();
     REMOTE.lock().unwrap().clear();
@@ -1219,6 +1442,7 @@ async fn handle_viewer(
         let (tx, rx) = tokio::sync::oneshot::channel();
         DECISIONS.lock().unwrap().insert(id, tx);
         state::host(|h| h.pending.push((id, who.clone())));
+        crate::sounds::play(crate::sounds::Sound::Join);
         log(crate::tr!("[espectador] {who} aguardando aprovação", "[viewer] {who} waiting for approval"));
         let approved = tokio::select! {
             r = tokio::time::timeout(Duration::from_secs(120), rx) => matches!(r, Ok(Ok(true))),
@@ -1242,7 +1466,7 @@ async fn handle_viewer(
     TOKENS.lock().unwrap().insert(token.clone(), granted_bits);
     let member_id = format!("v{}", NEXT_MEMBER.fetch_add(1, Ordering::Relaxed));
     MEMBERS.lock().unwrap().push(MemberEntry {
-        m: state::Member { id: member_id.clone(), name: name.clone(), host: false, ctl: granted_bits },
+        m: state::Member { id: member_id.clone(), name: name.clone(), host: false, ctl: granted_bits, cam: false },
         avatar: avatar.clone(),
     });
     if let Some(a) = &avatar {
@@ -1283,6 +1507,9 @@ async fn handle_viewer(
         log(crate::tr!("[espectador] + {who} reconectado", "[viewer] + {who} reconnected"));
     } else {
         log(crate::tr!("[espectador] + {who} conectado", "[viewer] + {who} connected"));
+        if !approval || trusted {
+            crate::sounds::play(crate::sounds::Sound::Join); // com sala de espera, o aviso tocou na chegada
+        }
     }
     if ctl.is_none() {
         log(crate::tr!(
@@ -1464,6 +1691,7 @@ async fn handle_viewer(
                                         set_control(&addr.to_string(), g & bits);
                                     }
                                     log(crate::tr!("[controle] {} pediu para jogar ({})", "[control] {} asked to play ({})", name, control::ctl_desc(bits)));
+                                    crate::sounds::play(crate::sounds::Sound::Request);
                                 }
                             }
                             "key" if g & CTL_KBM != 0 => {
@@ -1532,17 +1760,83 @@ async fn handle_viewer(
         }
     };
 
+    // Câmera do espectador: ele abre um stream STREAM_CAM; o vídeo vai para todos os outros.
+    let cams_in = {
+        let (conn, member_id) = (conn.clone(), member_id.clone());
+        async move {
+            loop {
+                let mut st = conn.accept_uni().await?;
+                let mut kind = [0u8; 1];
+                if st.read_exact(&mut kind).await.is_err() || kind[0] != net::STREAM_CAM || CAMHUB.lock().unwrap().contains_key(&member_id) {
+                    continue;
+                }
+                let tx = cam_start(&member_id);
+                log(crate::tr!("[câmera] {} ligou a câmera.", "[camera] {} turned the camera on.", member_name(&member_id)));
+                let mut buf = Vec::new();
+                while let Ok(true) = net::read_msg(&mut st, &mut buf).await {
+                    if buf.len() > 1 << 20 {
+                        break; // câmera não manda pedaços tão grandes
+                    }
+                    let _ = tx.send(CamChunk { key: crate::cam::has_sps(&buf), data: Bytes::copy_from_slice(&buf) });
+                }
+                drop(tx);
+                cam_end(&member_id);
+                log(crate::tr!("[câmera] {} desligou a câmera.", "[camera] {} turned the camera off.", member_name(&member_id)));
+            }
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        }
+    };
+
+    // Câmeras dos outros (e a do transmissor) para este espectador.
+    let cams_out = {
+        let (conn, member_id) = (conn.clone(), member_id.clone());
+        async move {
+            let Some(mut ev) = CAM_EVENTS.lock().unwrap().as_ref().map(|e| e.subscribe()) else {
+                std::future::pending::<()>().await;
+                unreachable!()
+            };
+            let mut set = tokio::task::JoinSet::new();
+            let existing: Vec<(String, broadcast::Receiver<CamChunk>)> =
+                CAMHUB.lock().unwrap().iter().filter(|(id, _)| **id != member_id).map(|(id, t)| (id.clone(), t.subscribe())).collect();
+            for (id, rx) in existing {
+                set.spawn(forward_cam(conn.clone(), id, rx));
+            }
+            loop {
+                tokio::select! {
+                    id = ev.recv() => match id {
+                        Ok(id) if id != member_id => {
+                            if let Some(rx) = CAMHUB.lock().unwrap().get(&id).map(|t| t.subscribe()) {
+                                set.spawn(forward_cam(conn.clone(), id, rx));
+                            }
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+                    },
+                    Some(_) = set.join_next() => {}
+                }
+            }
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        }
+    };
+
     let res: Result<()> = tokio::select! {
         r = video => r,
         r = audio => r,
         r = stats => r,
         r = control_task => r,
         r = datagrams => r,
+        r = cams_in => r,
+        r = cams_out => r,
         e = conn.closed() => Err(e.into()),
     };
     viewers.lock().unwrap().remove(&addr);
     CONNS.lock().unwrap().remove(&addr.to_string());
     REMOTE.lock().unwrap().remove(&addr.to_string());
+    if CAMHUB.lock().unwrap().contains_key(&member_id) {
+        cam_end(&member_id);
+    }
     MEMBERS.lock().unwrap().retain(|e| e.m.id != member_id);
     state::host(|h| {
         h.avatars.remove(&member_id);

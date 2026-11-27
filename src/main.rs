@@ -3,16 +3,19 @@
 
 mod audio;
 mod avatar;
+mod cam;
 mod control;
 mod gui;
 mod host;
 mod i18n;
 mod invite;
+mod link;
 mod net;
 mod procaudio;
 mod remote;
 mod room;
 mod settings;
+mod sounds;
 mod sources;
 mod state;
 mod updater;
@@ -125,6 +128,17 @@ fn main() {
         use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    // Aberto por um link gamestream://join/CODIGO: entrega ao GameStream já aberto ou abre na sala.
+    if let Some(code) = std::env::args().nth(1).as_deref().and_then(link::code_from_url) {
+        if link::forward_to_running(&code) {
+            return;
+        }
+        updater::cleanup_old();
+        if let Err(e) = gui::run(Some(code)) {
+            eprintln!("Erro na interface: {e}");
+        }
+        return;
+    }
     if std::env::args().len() > 1 {
         // Rodando pelo terminal: reaproveita o console de quem chamou.
         // Só se a entrada/saída não estiverem redirecionadas (pipe/arquivo): anexar ao console
@@ -142,7 +156,7 @@ fn main() {
         }
     } else {
         updater::cleanup_old();
-        if let Err(e) = gui::run() {
+        if let Err(e) = gui::run(None) {
             eprintln!("Erro na interface: {e}");
         }
     }
@@ -302,6 +316,10 @@ fn cli() -> Result<()> {
                             Some(k) => host::kick(&k),
                             None => state::log(crate::tr!("nenhum espectador \"{who}\"", "no viewer \"{who}\"")),
                         }
+                    } else if code == "cam on" {
+                        host::set_camera(Some(String::new()));
+                    } else if code == "cam off" {
+                        host::set_camera(None);
                     } else if code == "stop" {
                         host::request_stop();
                     } else if code == "revoke" {
@@ -346,6 +364,10 @@ fn cli() -> Result<()> {
                         viewer::send_chat(t);
                     } else if let Some(r) = cmd.strip_prefix("react ") {
                         viewer::send_react(r.trim());
+                    } else if cmd == "cam on" {
+                        viewer::set_camera(Some(String::new()));
+                    } else if cmd == "cam off" {
+                        viewer::set_camera(None);
                     } else if let Some(c) = cmd.strip_prefix("control ") {
                         let (pad, kbm) = match c.trim() {
                             "pad" => (true, false),

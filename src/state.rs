@@ -13,6 +13,8 @@ pub struct Member {
     pub host: bool,
     /// Controle remoto liberado (bits CTL_PAD | CTL_KBM): mostra quem está jogando.
     pub ctl: u8,
+    /// Está com a câmera ligada.
+    pub cam: bool,
 }
 
 #[derive(Default, Clone)]
@@ -38,9 +40,35 @@ pub struct HostStatus {
     pub error: Option<String>,
     /// A janela de prévia (o host vendo a própria transmissão) está aberta.
     pub preview_open: bool,
+    /// Codificação pausada porque ninguém está assistindo.
+    pub paused: bool,
+    /// A sua câmera está ligada (e um erro dela, se houver).
+    pub cam_on: bool,
+    pub cam_error: Option<String>,
+    /// Histórico (a cada 2 s): taxa de saída em `mbps` e bitrate alvo em `fps` (reaproveita Sample).
+    pub history: std::collections::VecDeque<Sample>,
     /// Código da sala no servidor de encontro (ex.: "KX7-92B") e se ela está conectada.
     pub room: Option<String>,
     pub room_online: bool,
+}
+
+/// Uma amostra das estatísticas (para o gráfico da conexão).
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub struct Sample {
+    pub ping: f32,
+    pub loss: f32,
+    pub mbps: f32,
+    pub fps: f32,
+}
+
+/// Histórico máximo dos gráficos (amostras).
+pub const HISTORY: usize = 180;
+
+pub fn push_sample(h: &mut std::collections::VecDeque<Sample>, s: Sample) {
+    h.push_back(s);
+    while h.len() > HISTORY {
+        h.pop_front();
+    }
 }
 
 /// Um espectador conectado, visto pelo transmissor.
@@ -107,6 +135,11 @@ pub struct ViewStatus {
     pub host_version: Option<String>,
     /// Aviso ao terminar (ex.: "Fulano encerrou a transmissão"), exibido depois de desconectar.
     pub notice: Option<String>,
+    /// Histórico das estatísticas (1 amostra por segundo, últimos 3 minutos).
+    pub history: std::collections::VecDeque<Sample>,
+    /// A sua câmera está ligada (e um erro dela, se houver).
+    pub cam_on: bool,
+    pub cam_error: Option<String>,
 }
 
 /// Números da transmissão para quem assiste (atualizados a cada segundo).

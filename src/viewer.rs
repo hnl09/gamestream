@@ -118,6 +118,7 @@ enum Outgoing {
     Chat(String),
     React(String),
     ControlReq { pad: bool, kbm: bool },
+    Camera(Option<String>),
 }
 
 static OUT: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Outgoing>>>> =
@@ -127,6 +128,15 @@ fn out(m: Outgoing) {
     if let Some(tx) = OUT.lock().unwrap().as_ref() {
         let _ = tx.send(m);
     }
+}
+
+/// Câmera que este espectador quer ligada (sobrevive às reconexões). Some("") = a primeira.
+static WANT_CAM: std::sync::LazyLock<Mutex<Option<String>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Liga (Some(câmera)) ou desliga (None) a sua câmera na transmissão que você está assistindo.
+pub fn set_camera(device: Option<String>) {
+    *WANT_CAM.lock().unwrap() = device.clone();
+    out(Outgoing::Camera(device));
 }
 
 /// Envia uma mensagem no chat da transmissão que você está assistindo.
@@ -779,6 +789,12 @@ async fn run_session(
     }
     let _reader_guard = AbortOnDrop(reader_task);
 
+    // Sua câmera (religa sozinha depois de uma reconexão).
+    let mut own_cam = AbortOnDrop(None);
+    if let Some(dev) = WANT_CAM.lock().unwrap().clone() {
+        own_cam.0 = Some(tokio::spawn(own_camera(conn.clone(), dev)));
+    }
+
     // Controle remoto.
     let mut granted = 0u8;
     let mut pad_task = AbortOnDrop(None);
@@ -877,6 +893,9 @@ async fn run_session(
                                             log(format!("[chat] {}: {}", m.from, m.text));
                                         }
                                         let _ = p.osd_tx.send(osd_chat_cmd(&m));
+                                        if !m.react && state::view(|s| s.my_id != m.id) {
+                                            crate::sounds::play(crate::sounds::Sound::Chat);
+                                        }
                                         state::view(|s| state::push_chat(&mut s.chat, m));
                                     }
                                 }
@@ -884,6 +903,9 @@ async fn run_session(
                                     let new = (if v["pad"].as_bool() == Some(true) { crate::control::CTL_PAD } else { 0 })
                                         | (if v["kbm"].as_bool() == Some(true) { crate::control::CTL_KBM } else { 0 });
                                     if new != granted {
+                                        if new != 0 && granted == 0 {
+                                            crate::sounds::play(crate::sounds::Sound::Request);
+                                        }
                                         if new != 0 {
                                             log(crate::tr!("[controle] o transmissor liberou: {}", "[control] the streamer allowed: {}", crate::control::ctl_desc(new)));
                                         } else if granted != 0 {
@@ -919,13 +941,18 @@ async fn run_session(
                                                     name: crate::control::clean_name(m["name"].as_str().unwrap_or("")),
                                                     host: m["host"].as_bool() == Some(true),
                                                     ctl: m["ctl"].as_u64().unwrap_or(0) as u8,
+                                                    cam: m["cam"].as_bool() == Some(true),
                                                 })
                                                 .collect()
                                         })
                                         .unwrap_or_default();
                                     let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();
+                                    let before = state::view(|s| s.roster.len());
                                     if state::view(|s| s.roster.iter().map(|m| m.name.as_str()).collect::<Vec<_>>() != names) {
                                         log(crate::tr!("[sala] {} na sala: {}", "[room] {} in the room: {}", names.len(), names.join(", ")));
+                                    }
+                                    if before > 0 && names.len() > before {
+                                        crate::sounds::play(crate::sounds::Sound::Join);
                                     }
                                     let cmd = state::view(|s| {
                                         s.avatars.retain(|id, _| list.iter().any(|m| &m.id == id));
@@ -966,6 +993,16 @@ async fn run_session(
                         let v = match m {
                             Outgoing::Chat(text) => serde_json::json!({ "t": "chat", "text": text }),
                             Outgoing::React(r) => serde_json::json!({ "t": "react", "r": r }),
+                            Outgoing::Camera(dev) => {
+                                if let Some(h) = own_cam.0.take() {
+                                    h.abort();
+                                    state::view(|s| s.cam_on = false);
+                                }
+                                if let Some(dev) = dev {
+                                    own_cam.0 = Some(tokio::spawn(own_camera(conn.clone(), dev)));
+                                }
+                                continue;
+                            }
                             Outgoing::ControlReq { pad, kbm } => {
                                 let bits = (if pad { crate::control::CTL_PAD } else { 0 }) | (if kbm { crate::control::CTL_KBM } else { 0 });
                                 state::view(|s| s.ctl_asked = bits);
@@ -1020,6 +1057,8 @@ async fn run_session(
                         v.stats.fps = ((f - last_frames) as f64 / dt).round() as u32;
                         v.stats.mbps = (b - last_bytes) as f64 * 8.0 / 1e6 / dt;
                         v.stats.ping_ms = ping;
+                        let s = state::Sample { ping: ping as f32, loss: v.stats.loss as f32, mbps: v.stats.mbps as f32, fps: v.stats.fps as f32 };
+                        state::push_sample(&mut v.history, s);
                         v.pad_found = crate::remote::read_pad().is_some();
                     });
                     (last_frames, last_bytes, last_t) = (f, b, std::time::Instant::now());
@@ -1047,6 +1086,32 @@ async fn run_session(
                         pipe_in.write_all(&buf).await?;
                     }
                     Err(anyhow!(crate::i18n::t("o vídeo parou de chegar")))
+                });
+            }
+            net::STREAM_CAM => {
+                // Câmera de outra pessoa: [tamanho do id][id] e depois o vídeo.
+                let mut n = [0u8; 1];
+                if st.read_exact(&mut n).await.is_err() {
+                    continue;
+                }
+                let mut id = vec![0u8; n[0] as usize];
+                if st.read_exact(&mut id).await.is_err() {
+                    continue;
+                }
+                let id = String::from_utf8_lossy(&id).to_string();
+                if !crate::settings::show_cams() {
+                    continue;
+                }
+                let name = state::view(|s| s.roster.iter().find(|m| m.id == id).map(|m| m.name.clone())).unwrap_or_default();
+                tokio::spawn(async move {
+                    let Ok(mut win) = crate::cam::CamWindow::open(&name) else { return };
+                    log(crate::tr!("[câmera] mostrando a câmera de {name}.", "[camera] showing {name}'s camera."));
+                    let mut buf = Vec::new();
+                    while let Ok(true) = net::read_msg(&mut st, &mut buf).await {
+                        if !win.write(&buf).await || win.closed() {
+                            break; // você fechou a janelinha
+                        }
+                    }
                 });
             }
             net::STREAM_STATS => {
@@ -1133,6 +1198,62 @@ async fn run_session(
     };
     tasks.abort_all();
     result
+}
+
+/// Sua câmera: captura, envia ao transmissor e mostra para você (espelho).
+async fn own_camera(conn: quinn::Connection, device: String) {
+    let r = async {
+        let ffmpeg = match crate::updater::ffmpeg_present() {
+            Some(f) => f,
+            None => {
+                log(crate::i18n::t("Baixando o FFmpeg (~90 MB) para a câmera. Isso acontece só uma vez."));
+                tokio::task::spawn_blocking(crate::updater::ensure_ffmpeg).await??
+            }
+        };
+        let device = if device.is_empty() {
+            let f = ffmpeg.clone();
+            tokio::task::spawn_blocking(move || crate::cam::list(&f)).await?.into_iter().next().context(crate::i18n::t("nenhuma câmera encontrada"))?
+        } else {
+            device
+        };
+        let mut child = crate::cam::spawn_capture(&ffmpeg, &device)?;
+        let mut s = conn.open_uni().await?;
+        s.write_all(&[net::STREAM_CAM]).await?;
+        let me = crate::settings::nick();
+        let mut mirror = crate::cam::CamWindow::open(&me).ok();
+        state::view(|v| {
+            v.cam_on = true;
+            v.cam_error = None;
+        });
+        log(crate::tr!("[câmera] sua câmera está ligada ({device}).", "[camera] your camera is on ({device})."));
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut got = false;
+        while let Some(n) = crate::cam::read_chunk(&mut child, &mut buf).await {
+            got = true;
+            s.write_all(&net::frame(&buf[..n])).await?;
+            if let Some(m) = mirror.as_mut() {
+                if !m.write(&buf[..n]).await || m.closed() {
+                    mirror = None; // fechou o espelho; a câmera continua para os outros
+                }
+            }
+        }
+        let _ = s.finish();
+        if !got {
+            anyhow::bail!("{}", crate::i18n::t("a câmera não respondeu (pode estar em uso por outro programa)"));
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    state::view(|v| {
+        v.cam_on = false;
+        if let Err(e) = &r {
+            v.cam_error = Some(format!("{e:#}"));
+        }
+    });
+    match r {
+        Ok(()) => log(crate::i18n::t("[câmera] sua câmera foi desligada.")),
+        Err(e) => log(crate::tr!("[câmera] {e:#}", "[camera] {e:#}")),
+    }
 }
 
 /// Envia o estado do controle (XInput) ao transmissor: a cada mudança e, parado, a cada 100 ms.

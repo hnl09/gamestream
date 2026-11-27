@@ -32,6 +32,10 @@ struct Extra {
     prefs: serde_json::Value,
     /// Espectadores já aprovados (hash da chave do espectador, nome): entram direto, sem sala de espera.
     trusted: Vec<(String, String)>,
+    /// Sons de aviso desligados.
+    mute_sounds: bool,
+    /// Não mostrar as câmeras dos outros.
+    hide_cams: bool,
 }
 
 const MAX_TRUSTED: usize = 200;
@@ -107,6 +111,8 @@ fn init() {
         let mut x = EXTRA.lock().unwrap();
         x.nick = crate::control::clean_name(saved["nick"].as_str().unwrap_or(""));
         x.prefs = saved["prefs"].clone();
+        x.mute_sounds = saved["sounds"].as_bool() == Some(false);
+        x.hide_cams = saved["show_cams"].as_bool() == Some(false);
         x.trusted = saved["trusted"]
             .as_array()
             .map(|a| {
@@ -135,7 +141,7 @@ fn init() {
 }
 
 fn save() {
-    let (nick, recent, prefs, trusted) = {
+    let (nick, recent, prefs, trusted, sounds, show_cams) = {
         let x = EXTRA.lock().unwrap();
         let trusted: Vec<serde_json::Value> = x.trusted.iter().map(|(k, n)| serde_json::json!({ "k": k, "name": n })).collect();
         let recent: Vec<serde_json::Value> = x
@@ -143,7 +149,7 @@ fn save() {
             .iter()
             .map(|r| serde_json::json!({ "code": r.code, "name": r.name, "last": r.last }))
             .collect();
-        (x.nick.clone(), recent, x.prefs.clone(), trusted)
+        (x.nick.clone(), recent, x.prefs.clone(), trusted, !x.mute_sounds, !x.hide_cams)
     };
     let v = serde_json::json!({
         "lang": if is_en() { "en" } else { "pt" },
@@ -152,6 +158,8 @@ fn save() {
         "recent": recent,
         "prefs": prefs,
         "trusted": trusted,
+        "sounds": sounds,
+        "show_cams": show_cams,
     });
     let p = path();
     if let Some(dir) = p.parent() {
@@ -209,6 +217,30 @@ pub fn set_nick(n: &str) {
         }
         x.nick = n;
     }
+    save();
+}
+
+/// Mostrar as câmeras dos outros (padrão: sim).
+pub fn show_cams() -> bool {
+    init();
+    !EXTRA.lock().unwrap().hide_cams
+}
+
+pub fn set_show_cams(on: bool) {
+    init();
+    EXTRA.lock().unwrap().hide_cams = !on;
+    save();
+}
+
+/// Sons de aviso ligados (padrão: sim).
+pub fn sounds() -> bool {
+    init();
+    !EXTRA.lock().unwrap().mute_sounds
+}
+
+pub fn set_sounds(on: bool) {
+    init();
+    EXTRA.lock().unwrap().mute_sounds = !on;
     save();
 }
 

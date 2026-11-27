@@ -22,6 +22,9 @@ pub const STREAM_AUDIO: u8 = 2;
 pub const STREAM_STATS: u8 = 3;
 /// Áudio comprimido com Opus (mesmo cabeçalho do PCM: taxa u32 + canais u16; depois pacotes Opus).
 pub const STREAM_AUDIO_OPUS: u8 = 4;
+/// Webcam (H.264). Espectador -> transmissor: [6] + mensagens; transmissor -> espectador:
+/// [6][tamanho do id][id de quem é a câmera] + mensagens.
+pub const STREAM_CAM: u8 = 6;
 
 pub struct Identity {
     cert: Vec<u8>,

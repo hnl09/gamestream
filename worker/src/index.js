@@ -9,6 +9,7 @@
 //   POST /v1/room/<CODE>/join          -> espectador: {"reply":[...]} -> {"invite":"GS-..."}
 //   POST /v1/speedtest                 -> descarta o corpo e devolve {"bytes":N}
 //   POST /v1/status                    -> {"codes":["KX792B",...]} -> {"live":{"KX792B":true,...}}
+//   GET  /j/<CODE>                     -> página "entrar na sala" (abre gamestream://join/<CODE>)
 //
 // Proteção contra abuso (o plano gratuito tem cota diária): limite de pedidos por IP
 // (60 por minuto; teste de conexão: 20 envios por minuto). Acima disso, responde 429.
@@ -73,10 +74,77 @@ async function allowed(env, request, heavy) {
 
 const MAX_STATUS_CODES = 8;
 
+const RELEASES = "https://github.com/hnl09/gamestream/releases/latest";
+
+// Página do link de convite: abre o GameStream na sala (gamestream://join/CODE) e, se ele não estiver
+// instalado, mostra onde baixar. Sem scripts externos nem cookies.
+function joinPage(code, lang) {
+  const pretty = code.slice(0, 3) + "-" + code.slice(3);
+  const pt = !/^en/i.test(lang || "");
+  const t = pt
+    ? {
+        title: `Entrar na sala ${pretty} - GameStream`,
+        desc: `Clique para assistir à transmissão (sala ${pretty}).`,
+        opening: "Abrindo o GameStream...",
+        button: "Abrir no GameStream",
+        or: "Não abriu? Abra o GameStream, vá em Assistir e digite o código:",
+        dl: "Ainda não tem o GameStream? Baixar para Windows",
+      }
+    : {
+        title: `Join room ${pretty} - GameStream`,
+        desc: `Click to watch the stream (room ${pretty}).`,
+        opening: "Opening GameStream...",
+        button: "Open in GameStream",
+        or: "Didn't open? Open GameStream, go to Watch and type the code:",
+        dl: "Don't have GameStream yet? Download for Windows",
+      };
+  const app = `gamestream://join/${code}`;
+  return `<!doctype html>
+<html lang="${pt ? "pt-BR" : "en"}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${t.title}</title>
+<meta property="og:title" content="${t.title}">
+<meta property="og:description" content="${t.desc}">
+<meta name="theme-color" content="#7c5cff">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #16171c; color: #f2f2f5;
+         font: 16px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 440px; padding: 32px 24px; text-align: center; }
+  h1 { margin: 0 0 8px; font-size: 26px; color: #9b82ff; }
+  .code { font: 700 34px/1.2 Consolas, monospace; letter-spacing: 2px; margin: 18px 0; }
+  a.btn { display: inline-block; padding: 12px 22px; border-radius: 10px; background: #7c5cff; color: #fff;
+          text-decoration: none; font-weight: 600; }
+  p { color: #a0a4b2; }
+  a { color: #9b82ff; }
+</style></head>
+<body><main>
+  <h1>GameStream</h1>
+  <p>${t.opening}</p>
+  <a class="btn" href="${app}">${t.button}</a>
+  <p>${t.or}</p>
+  <div class="code">${pretty}</div>
+  <p><a href="${RELEASES}">${t.dl}</a></p>
+</main>
+<script>setTimeout(function () { location.href = ${JSON.stringify(app)}; }, 150);</script>
+</body></html>`;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean); // ["v1", ...]
+
+    // Link de convite: /j/KX7-92B
+    if (parts[0] === "j" && parts.length === 2 && request.method === "GET") {
+      const code = parts[1].toUpperCase().replace(/-/g, "");
+      if (!CODE_RE.test(code)) return new Response("código inválido / invalid code", { status: 404 });
+      if (!(await allowed(env, request, false))) return new Response("too many requests", { status: 429 });
+      return new Response(joinPage(code, request.headers.get("Accept-Language")), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
+
     if (parts[0] !== "v1") return json({ error: "not found" }, 404);
 
     if (parts[1] === "health") return json({ ok: true });
