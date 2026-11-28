@@ -12,6 +12,8 @@ pub enum Sound {
     Chat,
     /// Pedido de controle / controle liberado.
     Request,
+    /// Vídeo salvo (replay ou gravação) e modo privacidade ligado/desligado.
+    Saved,
 }
 
 const RATE: u32 = 44_100;
@@ -22,6 +24,7 @@ fn notes(s: Sound) -> &'static [(f32, f32)] {
         Sound::Join => &[(784.0, 0.09), (1046.5, 0.16)],   // sol -> dó (subindo)
         Sound::Chat => &[(1318.5, 0.07)],                  // "plim" curto
         Sound::Request => &[(880.0, 0.08), (0.0, 0.05), (880.0, 0.10)], // dois toques
+        Sound::Saved => &[(1046.5, 0.06), (1568.0, 0.09)],                 // "clique" curto
     }
 }
 
@@ -61,6 +64,7 @@ fn wav(s: Sound) -> Vec<u8> {
 static JOIN: LazyLock<Vec<u8>> = LazyLock::new(|| wav(Sound::Join));
 static CHAT: LazyLock<Vec<u8>> = LazyLock::new(|| wav(Sound::Chat));
 static REQUEST: LazyLock<Vec<u8>> = LazyLock::new(|| wav(Sound::Request));
+static SAVED: LazyLock<Vec<u8>> = LazyLock::new(|| wav(Sound::Saved));
 static LAST: LazyLock<Mutex<Option<(Sound, Instant)>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Toca um aviso (se os sons estiverem ligados). O mesmo som não repete em menos de 1,5 s.
@@ -79,6 +83,7 @@ pub fn play(s: Sound) {
         Sound::Join => &JOIN,
         Sound::Chat => &CHAT,
         Sound::Request => &REQUEST,
+        Sound::Saved => &SAVED,
     };
     use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
     unsafe {

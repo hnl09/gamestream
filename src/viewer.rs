@@ -110,6 +110,8 @@ pub enum OverlayEv {
     React(String),
     /// Apontar na tela (posição no vídeo, 0..1).
     Ping(f32, f32),
+    /// Desenho rápido (traço com pontos no vídeo, 0..1).
+    Draw(Vec<(f32, f32)>),
 }
 
 /// O que a interface (ou o terminal) manda para o transmissor.
@@ -119,6 +121,7 @@ enum Outgoing {
     React(String),
     ControlReq { pad: bool, kbm: bool },
     Camera(Option<String>),
+    Draw(Vec<(f32, f32)>),
 }
 
 static OUT: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Outgoing>>>> =
@@ -146,6 +149,11 @@ pub fn send_chat(text: &str) {
     }
 }
 
+/// Desenho (pelo terminal; na janela do vídeo é segurar o botão direito e arrastar).
+pub fn send_draw(pts: Vec<(f32, f32)>) {
+    out(Outgoing::Draw(pts));
+}
+
 pub fn send_react(r: &str) {
     if let Some(r) = crate::control::clean_react(r) {
         out(Outgoing::React(r));
@@ -158,7 +166,16 @@ pub fn request_control(pad: bool, kbm: bool) {
 }
 
 /// Comando IPC que mostra uma mensagem/reação na janela do vídeo.
+/// "Volto já" na janela do vídeo (modo privacidade do transmissor).
+pub fn osd_privacy_cmd(on: bool, host: &str) -> String {
+    serde_json::json!({ "command": ["script-message", "gs-privacy", if on { "1" } else { "0" }, host] }).to_string()
+}
+
 pub fn osd_chat_cmd(m: &crate::control::ChatMsg) -> String {
+    if let Some(pts) = &m.draw {
+        let s: Vec<String> = pts.iter().map(|(x, y)| format!("{x:.4},{y:.4}")).collect();
+        return serde_json::json!({ "command": ["script-message", "gs-draw", m.from, s.join(";")] }).to_string();
+    }
     if let Some((x, y)) = m.ping {
         return serde_json::json!({ "command": ["script-message", "gs-ping", m.from, x.to_string(), y.to_string()] }).to_string();
     }
@@ -238,6 +255,18 @@ fn overlay_event(v: &serde_json::Value) -> Option<OverlayEv> {
     match args.first()?.as_str()? {
         "gs-out-chat" => Some(OverlayEv::Chat(text)),
         "gs-out-react" => Some(OverlayEv::React(text)),
+        "gs-out-draw" => {
+            let pts: Vec<(f32, f32)> = text
+                .split(';')
+                .filter_map(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    let (x, y) = (x.parse::<f32>().ok()?, y.parse::<f32>().ok()?);
+                    ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some((x, y))
+                })
+                .take(crate::control::MAX_STROKE)
+                .collect();
+            (pts.len() >= 2).then_some(OverlayEv::Draw(pts))
+        }
         "gs-out-ping" => {
             let (x, y) = (text.parse::<f32>().ok()?, args.get(2)?.as_str()?.parse::<f32>().ok()?);
             ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some(OverlayEv::Ping(x, y))
@@ -297,6 +326,8 @@ pub async fn run(o: ViewOpts, stop: impl Future<Output = ()>) -> Result<()> {
         v.reconnecting = None;
         v.ctl_granted = 0;
         v.kbm_active = false;
+        v.privacy = false;
+        v.low = false;
     });
     match &r {
         Ok(()) => {
@@ -874,15 +905,40 @@ async fn run_session(
                                         s.has_control = true;
                                         s.my_id = you;
                                         s.host_version = Some(hv);
+                                        s.privacy = false; // o transmissor reenvia se ainda estiver ligado
                                     });
+                                    let _ = p.osd_tx.send(osd_privacy_cmd(false, &host));
                                     if let Some(code) = &room_code {
                                         let name = if host.is_empty() { state::view(|s| s.peer.clone()) } else { host.clone() };
                                         crate::settings::add_recent(code, &name);
                                     }
                                 }
-                                "ping" => {
+                                "ping" | "draw" => {
                                     if let Some(m) = crate::control::ChatMsg::from_json(&v) {
                                         let _ = p.osd_tx.send(osd_chat_cmd(&m));
+                                    }
+                                }
+                                "privacy" => {
+                                    let on = v["on"] == true;
+                                    let host = state::view(|s| {
+                                        s.privacy = on;
+                                        s.host_name.clone()
+                                    });
+                                    let _ = p.osd_tx.send(osd_privacy_cmd(on, &host));
+                                    if on {
+                                        log(crate::tr!("[transmissor] {host} ligou o modo privacidade (volta já).", "[streamer] {host} turned on privacy mode (be right back)."));
+                                    } else {
+                                        log(crate::tr!("[transmissor] {host} voltou.", "[streamer] {host} is back."));
+                                    }
+                                }
+                                "quality" => {
+                                    let low = v["low"] == true;
+                                    if state::view(|s| std::mem::replace(&mut s.low, low)) != low {
+                                        if low {
+                                            log(crate::i18n::t("[qualidade] sua conexão está mais fraca que a dos outros: recebendo a versão leve (720p, 30 FPS) para não travar."));
+                                        } else {
+                                            log(crate::i18n::t("[qualidade] conexão estável: voltou para a qualidade normal."));
+                                        }
                                     }
                                 }
                                 "chat" | "react" => {
@@ -992,6 +1048,10 @@ async fn run_session(
                     if let Some(m) = m {
                         let v = match m {
                             Outgoing::Chat(text) => serde_json::json!({ "t": "chat", "text": text }),
+                            Outgoing::Draw(pts) => {
+                                let pts: Vec<[f32; 2]> = pts.iter().map(|&(x, y)| [x, y]).collect();
+                                serde_json::json!({ "t": "draw", "pts": pts })
+                            }
                             Outgoing::React(r) => serde_json::json!({ "t": "react", "r": r }),
                             Outgoing::Camera(dev) => {
                                 if let Some(h) = own_cam.0.take() {
@@ -1021,6 +1081,10 @@ async fn run_session(
                         Some(OverlayEv::Chat(t)) => if let Some(t) = crate::control::clean_text(&t) { pending_out.push(serde_json::json!({ "t": "chat", "text": t })) },
                         Some(OverlayEv::React(r)) => if let Some(r) = crate::control::clean_react(&r) { pending_out.push(serde_json::json!({ "t": "react", "r": r })) },
                         Some(OverlayEv::Ping(x, y)) => pending_out.push(serde_json::json!({ "t": "ping", "x": x, "y": y })),
+                        Some(OverlayEv::Draw(pts)) => {
+                            let pts: Vec<[f32; 2]> = pts.iter().map(|&(x, y)| [x, y]).collect();
+                            pending_out.push(serde_json::json!({ "t": "draw", "pts": pts }));
+                        }
                         None => {}
                     }
                     continue;

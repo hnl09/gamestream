@@ -271,22 +271,69 @@ pub fn request_stop() {
 /// Envia uma mensagem no chat como transmissor.
 pub fn send_chat(text: &str) {
     if let (Some(tx), Some(text)) = (CHAT.lock().unwrap().as_ref(), control::clean_text(text)) {
-        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text, react: false, ping: None });
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text, react: false, ping: None, draw: None });
     }
 }
 
 /// Envia uma reação como transmissor.
 pub fn send_react(r: &str) {
     if let (Some(tx), Some(r)) = (CHAT.lock().unwrap().as_ref(), control::clean_react(r)) {
-        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: r, react: true, ping: None });
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: r, react: true, ping: None, draw: None });
     }
 }
 
 /// Aponta um lugar no vídeo (pré-visualização do transmissor).
+/// Desenho rápido do transmissor (pela janela de pré-visualização).
+pub fn send_draw(pts: Vec<(f32, f32)>) {
+    if let Some(tx) = CHAT.lock().unwrap().as_ref() {
+        let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: String::new(), react: false, ping: None, draw: Some(pts) });
+    }
+}
+
+/// Modo privacidade: os espectadores veem "Volto já" (sem imagem nem som) até desligar.
+static PRIVACY: AtomicBool = AtomicBool::new(false);
+
+pub fn privacy() -> bool {
+    PRIVACY.load(Ordering::Relaxed)
+}
+
+pub fn set_privacy(on: bool) {
+    if state::host(|h| h.invite.is_none()) {
+        return; // não está transmitindo
+    }
+    if PRIVACY.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    crate::audio::MUTE.store(on, Ordering::Relaxed);
+    state::host(|h| h.privacy = on);
+    if let Some(tx) = ROSTER.lock().unwrap().as_ref() {
+        let _ = tx.send(serde_json::json!({ "t": "privacy", "on": on }));
+    }
+    if on {
+        log(crate::i18n::t("[privacidade] ligado: os espectadores veem \"Volto já\" (sem imagem e sem som). Ctrl+F9 desliga."));
+    } else {
+        log(crate::i18n::t("[privacidade] desligado: a transmissão voltou."));
+    }
+    crate::sounds::play(crate::sounds::Sound::Saved);
+}
+
+pub fn toggle_privacy() {
+    set_privacy(!privacy());
+}
+
+/// Salva os últimos 30 s da transmissão (Ctrl+F10).
+pub fn save_replay() {
+    crate::record::save_replay();
+}
+
+pub fn toggle_record() {
+    crate::record::toggle_record();
+}
+
 pub fn send_ping(x: f32, y: f32) {
     if let Some(tx) = CHAT.lock().unwrap().as_ref() {
         if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
-            let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: String::new(), react: false, ping: Some((x, y)) });
+            let _ = tx.send(ChatMsg { id: "h".into(), from: crate::settings::nick(), text: String::new(), react: false, ping: Some((x, y)), draw: None });
         }
     }
 }
@@ -431,6 +478,9 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
                     r = async { match roster_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => match r {
+                        Ok(v) if v["t"] == "privacy" => {
+                            let _ = osd_tx.send(crate::viewer::osd_privacy_cmd(v["on"] == true, ""));
+                        }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => send_members(),
                         Err(broadcast::error::RecvError::Closed) => roster_rx = None,
                     },
@@ -438,6 +488,7 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
                         Some(crate::viewer::OverlayEv::Chat(t)) => send_chat(&t),
                         Some(crate::viewer::OverlayEv::React(r)) => send_react(&r),
                         Some(crate::viewer::OverlayEv::Ping(x, y)) => send_ping(x, y),
+                        Some(crate::viewer::OverlayEv::Draw(pts)) => send_draw(pts),
                         None => break,
                     },
                 }
@@ -512,13 +563,13 @@ pub struct HostOpts {
 }
 
 #[derive(Clone)]
-struct VideoChunk {
-    raw: Bytes,
+pub(crate) struct VideoChunk {
+    pub(crate) raw: Bytes,
     framed: Bytes,
     /// Posição de um VPS (início de keyframe) dentro do chunk, se houver.
     vps: Option<usize>,
     /// Quando o encoder produziu este trecho (para medir o atraso de cada espectador).
-    at: Instant,
+    pub(crate) at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -552,13 +603,60 @@ struct Viewer {
     /// Controle remoto pedido / liberado (bits CTL_PAD | CTL_KBM).
     wants: Arc<AtomicU8>,
     granted: Arc<AtomicU8>,
+    /// Recebendo a versão leve (720p30) por ter a conexão mais fraca que a dos outros.
+    low: Arc<AtomicBool>,
 }
 
 type Viewers = Arc<Mutex<HashMap<SocketAddr, Viewer>>>;
 
-fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u32, test: bool) -> Vec<String> {
+/// Versão leve: 1280x720 a 30 FPS (no máximo).
+const LOW_W: u32 = 1280;
+const LOW_H: u32 = 720;
+const LOW_FPS: u32 = 30;
+/// Bitrate da versão leve: começa em 3 Mbps e varia entre 1 e 6.
+const LOW_START: u32 = 3;
+const LOW_MIN: u32 = 1;
+const LOW_MAX: u32 = 6;
+/// A versão leve já está saindo do encoder (dá para trocar um espectador para ela).
+static LOW_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// Alguém precisa da versão leve?
+fn any_low(viewers: &Viewers) -> bool {
+    viewers.lock().unwrap().values().any(|v| v.low.load(Ordering::Relaxed))
+}
+
+/// `low` = versão leve (720p30): com o Windows Graphics Capture a imagem já sai reduzida da captura
+/// (na GPU); sem ele, reduz na CPU.
+fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u32, test: bool, low: Option<bool>) -> Vec<String> {
     let br = format!("{bitrate}M");
     let buf = format!("{}k", bitrate * 1000 / 2);
+    let fps = if low.is_some() { o.fps.min(LOW_FPS) } else { o.fps };
+    if let Some(gfx) = low {
+        let hm = cap.hmonitor.or_else(|| if cap.crop.is_none() { sources::hmonitor_for(cap.output_idx) } else { None });
+        let target = match (gfx, cap.hwnd, hm) {
+            (true, Some(h), _) => Some(format!("hwnd={h}")),
+            (true, None, Some(hm)) => Some(format!("hmonitor={hm}")),
+            _ => None,
+        };
+        let mut graph = match &target {
+            Some(t) => format!("gfxcapture={t}:max_framerate={fps}:resize_mode=scale_aspect:width={LOW_W}:height={LOW_H}:capture_cursor=1"),
+            None => {
+                let mut g = format!("ddagrab=output_idx={}:framerate={fps}:draw_mouse=1", cap.output_idx);
+                if let Some((x, y, w, h)) = cap.crop {
+                    g.push_str(&format!(":offset_x={x}:offset_y={y}:video_size={w}x{h}"));
+                }
+                g.push_str(&format!(",hwdownload,format=bgra,scale=-2:{LOW_H}:flags=bilinear"));
+                if enc == Enc::Qsv {
+                    g.push_str(",format=nv12");
+                }
+                g
+            }
+        };
+        if target.is_some() && cpu_copy {
+            graph.push_str(if enc == Enc::Qsv { ",hwdownload,format=bgra,format=nv12" } else { ",hwdownload,format=bgra" });
+        }
+        return encoder_args(graph, enc, &br, &buf, fps, test);
+    }
     let mut graph = if let Some(h) = cap.hwnd {
         // Captura nativa da janela: segue a janela, funciona coberta, e escala se ela mudar de tamanho.
         format!(
@@ -579,6 +677,10 @@ fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u
     if cpu_copy {
         graph.push_str(if enc == Enc::Qsv { ",hwdownload,format=bgra,format=nv12" } else { ",hwdownload,format=bgra" });
     }
+    encoder_args(graph, enc, &br, &buf, fps, test)
+}
+
+fn encoder_args(graph: String, enc: Enc, br: &str, buf: &str, fps: u32, test: bool) -> Vec<String> {
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-filter_complex", &graph]
         .iter()
         .map(|s| s.to_string())
@@ -602,8 +704,8 @@ fn ffmpeg_args(o: &HostOpts, cap: &Capture, enc: Enc, cpu_copy: bool, bitrate: u
         ],
     };
     a.extend(enc_args.iter().map(|s| s.to_string()));
-    let gop = o.fps.to_string(); // 1 keyframe por segundo: viewer novo / perda de pacote se recupera rápido
-    a.extend(["-b:v", &br, "-maxrate", &br, "-bufsize", &buf, "-g", &gop].iter().map(|s| s.to_string()));
+    let gop = fps.to_string(); // 1 keyframe por segundo: viewer novo / perda de pacote se recupera rápido
+    a.extend(["-b:v", br, "-maxrate", br, "-bufsize", buf, "-g", &gop].iter().map(|s| s.to_string()));
     // Keyframe também por tempo: a captura de janela só gera frames quando a janela muda,
     // e quem entra no meio precisa de um keyframe para começar a ver.
     a.extend(["-force_key_frames", "expr:gte(t,n_forced*1)"].iter().map(|s| s.to_string()));
@@ -633,7 +735,7 @@ async fn detect_encoder(o: &HostOpts, cap: &Capture) -> Result<(Enc, bool)> {
     };
     for (enc, cpu_copy) in candidates {
         let fut = Command::new(&o.ffmpeg)
-            .args(ffmpeg_args(o, cap, enc, cpu_copy, 10, true))
+            .args(ffmpeg_args(o, cap, enc, cpu_copy, 10, true, None))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -793,6 +895,8 @@ async fn encoder_loop(
 ) -> Result<()> {
     // Reinícios seguidos por falha de captura (o contador zera quando o encoder fica estável).
     let mut failures: u32 = 0;
+    // Saiu do modo privacidade: volta a mandar a partir do próximo quadro-chave.
+    let mut wait_key = false;
     // Captura alternativa (Windows Graphics Capture) adotada depois de falhas do ddagrab.
     let mut fallback: Option<Capture> = None;
     let mut tip_shown = false;
@@ -806,13 +910,13 @@ async fn encoder_loop(
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
             state::host(|h| h.paused = false);
-            log(crate::i18n::t("[encoder] espectador conectado: codificação retomada."));
+            log(crate::i18n::t("[encoder] codificação retomada."));
         }
         let br = *br_rx.borrow_and_update();
         let cap = fallback.clone().unwrap_or_else(|| cap_rx.borrow_and_update().clone());
         let started = Instant::now();
         let mut child = Command::new(&o.ffmpeg)
-            .args(ffmpeg_args(o, &cap, enc, cpu_copy, br, false))
+            .args(ffmpeg_args(o, &cap, enc, cpu_copy, br, false, None))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -837,7 +941,17 @@ async fn encoder_loop(
                     return anyhow::Ok(());
                 }
                 bytes_out.fetch_add(n as u64, Ordering::Relaxed);
-                let raw = Bytes::copy_from_slice(&buf[..n]);
+                let mut raw = Bytes::copy_from_slice(&buf[..n]);
+                // Modo privacidade: nada da tela sai do PC (nem para a gravação).
+                if privacy() {
+                    wait_key = true;
+                    continue;
+                }
+                if wait_key {
+                    let Some(off) = find_vps(&raw) else { continue };
+                    raw = raw.slice(off..);
+                    wait_key = false;
+                }
                 let _ = vtx.send(VideoChunk { vps: find_vps(&raw), framed: Bytes::from(net::frame(&raw)), raw, at: Instant::now() });
             }
         };
@@ -896,9 +1010,105 @@ async fn encoder_loop(
     }
 }
 
+/// Encoder da versão leve (720p30): só roda enquanto algum espectador precisa dela.
+#[allow(clippy::too_many_arguments)]
+async fn low_encoder_loop(
+    o: &HostOpts,
+    mut cap_rx: watch::Receiver<Capture>,
+    enc: Enc,
+    cpu_copy: bool,
+    gfx: bool,
+    mut br_rx: watch::Receiver<u32>,
+    vtx: broadcast::Sender<VideoChunk>,
+    bytes_out: Arc<AtomicU64>,
+    viewers: Viewers,
+) -> Result<()> {
+    loop {
+        while !any_low(&viewers) {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let br = *br_rx.borrow_and_update();
+        let cap = cap_rx.borrow_and_update().clone();
+        state::host(|h| {
+            h.low_active = true;
+            h.low_bitrate = br;
+        });
+        let mut child = Command::new(&o.ffmpeg)
+            .args(ffmpeg_args(o, &cap, enc, cpu_copy, br, false, Some(gfx)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .kill_on_drop(true)
+            .spawn()
+            .context(crate::i18n::t("não foi possível iniciar o ffmpeg.exe"))?;
+        let mut stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                log(format!("[ffmpeg leve] {l}"));
+            }
+        });
+        let read = async {
+            let mut buf = vec![0u8; 1 << 20];
+            let mut wait_key = true;
+            loop {
+                let n = stdout.read(&mut buf).await?;
+                if n == 0 {
+                    return anyhow::Ok(());
+                }
+                bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                let mut raw = Bytes::copy_from_slice(&buf[..n]);
+                if privacy() {
+                    wait_key = true;
+                    continue;
+                }
+                if wait_key {
+                    let Some(off) = find_vps(&raw) else { continue };
+                    raw = raw.slice(off..);
+                    wait_key = false;
+                    LOW_LIVE.store(true, Ordering::Relaxed);
+                }
+                let _ = vtx.send(VideoChunk { vps: find_vps(&raw), framed: Bytes::from(net::frame(&raw)), raw, at: Instant::now() });
+            }
+        };
+        // Ninguém mais na versão leve há 15 s: desliga o segundo encoder.
+        let idle = async {
+            let mut since: Option<Instant> = None;
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if any_low(&viewers) {
+                    since = None;
+                } else if since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(15) {
+                    return;
+                }
+            }
+        };
+        let mut stop = false;
+        tokio::select! {
+            r = read => {
+                if let Err(e) = r {
+                    log(crate::tr!("[versão leve] {e:#}", "[light version] {e:#}"));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            _ = br_rx.changed() => {}
+            _ = cap_rx.changed() => {}
+            _ = idle => stop = true,
+        }
+        let _ = child.kill().await;
+        if stop {
+            LOW_LIVE.store(false, Ordering::Relaxed);
+            state::host(|h| h.low_active = false);
+            log(crate::i18n::t("[qualidade] ninguém mais precisa da versão leve: segundo encoder desligado."));
+        }
+    }
+}
+
 /// O encoder precisa rodar? (há espectadores ou a pré-visualização está aberta)
 fn encoder_needed(viewers: &Viewers) -> bool {
-    !viewers.lock().unwrap().is_empty() || preview_wanted()
+    !viewers.lock().unwrap().is_empty() || preview_wanted() || crate::record::recording()
 }
 
 /// Termina quando ninguém precisa do encoder há `dur` (evita parar/religar quando alguém só reconecta).
@@ -914,58 +1124,122 @@ async fn idle_for(viewers: &Viewers, dur: Duration) {
     }
 }
 
-/// Controle de bitrate AIMD: cai 30% quando algum viewer sofre (perda > 2% ou atraso),
-/// sobe 15% depois de 20 s sem problemas, até o teto.
-async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>, viewers: Viewers) {
+/// Situação de cada espectador para a versão leve.
+#[derive(Default)]
+struct ViewerQuality {
+    /// Medição anterior: (pacotes perdidos, enviados, descartes, ms travado).
+    prev: Option<(u64, u64, u64, u64)>,
+    /// Desde quando está sem problemas.
+    clean_since: Option<Instant>,
+    /// Quantas vezes já foi para a versão leve nesta transmissão (cada volta espera mais).
+    demotions: u32,
+    demoted_at: Option<Instant>,
+}
+
+/// Controle de qualidade, a cada 2 s:
+///  * quando só alguns espectadores sofrem (perda alta, atraso), eles passam para a versão leve
+///    (720p30) e os outros continuam na qualidade normal;
+///  * quando todos sofrem (ou só há um), o bitrate de todos cai 30% (modo automático), e sobe 15%
+///    depois de um tempo estável, até o teto;
+///  * quem está na versão leve volta para a normal depois de alguns minutos estável.
+async fn bitrate_controller(start: u32, ceiling: u32, auto: bool, br_tx: watch::Sender<u32>, low_tx: watch::Sender<u32>, viewers: Viewers) {
     let mut cur = start;
     let mut last_change = Instant::now();
     let mut clean_since = Instant::now();
     // Bitrate em que a conexão não deu conta da última vez: chegar perto dele de novo exige mais tempo estável.
     let mut trouble_at: Option<u32> = None;
-    // (pacotes perdidos, enviados, descartes, ms travado) da medição anterior, por espectador.
-    let mut prev: HashMap<SocketAddr, (u64, u64, u64, u64)> = HashMap::new();
+    let mut low_cur = LOW_START;
+    let mut low_last_change = Instant::now();
+    let mut low_clean_since = Instant::now();
+    let mut q: HashMap<SocketAddr, ViewerQuality> = HashMap::new();
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let mut bad: Option<String> = None;
-        let n_viewers;
+        // (endereço, nome, está na leve, motivo do problema)
+        let mut rows: Vec<(SocketAddr, String, bool, Option<String>)> = Vec::new();
         {
             let v = viewers.lock().unwrap();
-            n_viewers = v.len();
-            prev.retain(|a, _| v.contains_key(a));
+            q.retain(|a, _| v.contains_key(a));
             for (addr, vw) in v.iter() {
                 let s = vw.conn.stats();
-                let now = (
-                    s.path.lost_packets,
-                    s.path.sent_packets,
-                    vw.lagged.load(Ordering::Relaxed),
-                    vw.stalled_ms.load(Ordering::Relaxed),
-                );
-                let (pl, ps, plg, pst) = prev.get(addr).copied().unwrap_or(now);
+                let now = (s.path.lost_packets, s.path.sent_packets, vw.lagged.load(Ordering::Relaxed), vw.stalled_ms.load(Ordering::Relaxed));
+                let e = q.entry(*addr).or_default();
+                let (pl, ps, plg, pst) = e.prev.unwrap_or(now);
                 let (dl, ds) = (now.0 - pl, now.1 - ps);
-                // Só reduz por congestionamento de verdade: o espectador ficou para trás (quadros
+                // Só conta congestionamento de verdade: o espectador ficou para trás (quadros
                 // descartados ou envio travado por mais de 15% do tempo) ou a perda é alta. Uma perda
                 // pequena e constante não melhora baixando o bitrate: os pacotes são reenviados e o BBR
                 // mantém a taxa.
-                if now.2 > plg {
-                    bad = Some(crate::tr!("{addr} com atraso no recebimento", "{addr} is lagging behind"));
+                let bad = if now.2 > plg {
+                    Some(crate::tr!("{} com atraso no recebimento", "{} is lagging behind", vw.name))
                 } else if now.3 - pst > 300 {
-                    bad = Some(crate::tr!("{addr} não está recebendo na velocidade enviada", "{addr} cannot keep up with the sending rate"));
+                    Some(crate::tr!("{} não está recebendo na velocidade enviada", "{} cannot keep up with the sending rate", vw.name))
                 } else if ds > 200 && dl * 100 > ds * 10 {
-                    bad = Some(crate::tr!("{addr} com {:.1}% de perda de pacotes", "{addr} has {:.1}% packet loss", dl as f64 * 100.0 / ds as f64));
+                    Some(crate::tr!("{} com {:.1}% de perda de pacotes", "{} has {:.1}% packet loss", vw.name, dl as f64 * 100.0 / ds as f64))
+                } else {
+                    None
+                };
+                e.prev = Some(now);
+                if bad.is_some() {
+                    e.clean_since = None;
+                } else if e.clean_since.is_none() {
+                    e.clean_since = Some(Instant::now());
                 }
-                prev.insert(*addr, now);
+                rows.push((*addr, vw.name.clone(), vw.low.load(Ordering::Relaxed), bad));
             }
         }
-        if let Some(why) = bad {
+        let set_low = |addr: &SocketAddr, on: bool, br: u32| {
+            if let Some(vw) = viewers.lock().unwrap().get(addr) {
+                vw.low.store(on, Ordering::Relaxed);
+                vw.conn.set_send_window(net::send_window_for(if on { LOW_MAX } else { br }));
+            }
+        };
+        let main: Vec<&(SocketAddr, String, bool, Option<String>)> = rows.iter().filter(|r| !r.2).collect();
+        let lows: Vec<&(SocketAddr, String, bool, Option<String>)> = rows.iter().filter(|r| r.2).collect();
+        let bad_main: Vec<&&(SocketAddr, String, bool, Option<String>)> = main.iter().filter(|r| r.3.is_some()).collect();
+
+        // Todos foram para a versão leve (ou só sobrou quem está nela): voltam para a normal, que se
+        // ajusta sozinha a eles.
+        if main.is_empty() && !lows.is_empty() {
+            for r in &lows {
+                set_low(&r.0, false, cur);
+            }
+            log(crate::i18n::t("[qualidade] só sobrou quem estava na versão leve: todos de volta à qualidade normal (o bitrate se ajusta a eles)."));
+            continue;
+        }
+
+        let mut reduce_all: Option<String> = None;
+        if !bad_main.is_empty() {
+            if main.len() >= 2 && bad_main.len() < main.len() {
+                // Só alguns sofrem: eles vão para a versão leve; os outros não perdem qualidade.
+                for r in &bad_main {
+                    set_low(&r.0, true, cur);
+                    let e = q.entry(r.0).or_default();
+                    e.demotions += 1;
+                    e.demoted_at = Some(Instant::now());
+                    e.clean_since = None;
+                    log(crate::tr!(
+                        "[qualidade] {}: recebendo a versão leve (720p, 30 FPS); os outros continuam em {cur} Mbps",
+                        "[quality] {}: now receiving the light version (720p, 30 FPS); the others stay at {cur} Mbps",
+                        r.3.as_deref().unwrap_or(&r.1)
+                    ));
+                }
+                clean_since = Instant::now();
+            } else {
+                reduce_all = bad_main[0].3.clone();
+            }
+        }
+
+        // Bitrate de todos (modo automático).
+        if let Some(why) = reduce_all {
             clean_since = Instant::now();
-            if last_change.elapsed() >= Duration::from_secs(4) && cur > MIN_BITRATE {
+            if auto && last_change.elapsed() >= Duration::from_secs(4) && cur > MIN_BITRATE {
                 trouble_at = Some(cur);
                 cur = (cur * 7 / 10).max(MIN_BITRATE);
                 log(crate::tr!("[auto] {why}: bitrate reduzido para {cur} Mbps", "[auto] {why}: bitrate lowered to {cur} Mbps"));
                 let _ = br_tx.send(cur);
                 last_change = Instant::now();
             }
-        } else if n_viewers > 0 && cur < ceiling && {
+        } else if auto && !main.is_empty() && cur < ceiling && {
             let next = (cur * 115 / 100).max(cur + 1).min(ceiling);
             // Longe do ponto onde houve problema: sobe a cada 10 s estáveis; perto dele, só após 60 s.
             let wait = if trouble_at.is_some_and(|t| next * 100 > t * 85) { 60 } else { 10 };
@@ -980,9 +1254,47 @@ async fn bitrate_controller(start: u32, ceiling: u32, br_tx: watch::Sender<u32>,
             last_change = Instant::now();
             clean_since = Instant::now();
         }
+
+        // Versão leve: ajusta o bitrate dela a quem está nela e devolve quem ficou estável.
+        let lows: Vec<&(SocketAddr, String, bool, Option<String>)> = rows.iter().filter(|r| r.2).collect();
+        if !lows.is_empty() {
+            if let Some(why) = lows.iter().find_map(|r| r.3.clone()) {
+                low_clean_since = Instant::now();
+                if low_last_change.elapsed() >= Duration::from_secs(4) && low_cur > LOW_MIN {
+                    low_cur = (low_cur * 7 / 10).max(LOW_MIN);
+                    log(crate::tr!("[qualidade] {why}: versão leve reduzida para {low_cur} Mbps", "[quality] {why}: light version lowered to {low_cur} Mbps"));
+                    let _ = low_tx.send(low_cur);
+                    low_last_change = Instant::now();
+                }
+            } else if low_cur < LOW_MAX.min(cur) && low_clean_since.elapsed() >= Duration::from_secs(10) && low_last_change.elapsed() >= Duration::from_secs(10) {
+                low_cur = (low_cur * 115 / 100).max(low_cur + 1).min(LOW_MAX.min(cur));
+                let _ = low_tx.send(low_cur);
+                low_last_change = Instant::now();
+                low_clean_since = Instant::now();
+            }
+            for r in &lows {
+                let e = q.entry(r.0).or_default();
+                // Volta para a normal depois de 3 min estável (6, 12... se já caiu antes).
+                let need = Duration::from_secs(180 * (1u64 << e.demotions.saturating_sub(1).min(3)));
+                if e.clean_since.is_some_and(|t| t.elapsed() >= need) {
+                    set_low(&r.0, false, cur);
+                    e.clean_since = None;
+                    log(crate::tr!("[qualidade] {}: conexão estável, de volta à qualidade normal", "[quality] {}: stable connection, back to normal quality", r.1));
+                }
+            }
+        } else {
+            low_cur = LOW_START;
+            if *low_tx.borrow() != LOW_START {
+                let _ = low_tx.send(LOW_START);
+            }
+        }
+        state::host(|h| h.low_bitrate = low_cur);
+
         if state::host(|h| std::mem::replace(&mut h.bitrate, cur)) != cur {
             for vw in viewers.lock().unwrap().values() {
-                vw.conn.set_send_window(net::send_window_for(cur));
+                if !vw.low.load(Ordering::Relaxed) {
+                    vw.conn.set_send_window(net::send_window_for(cur));
+                }
             }
         }
     }
@@ -1036,6 +1348,11 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     let (vtx, _) = broadcast::channel::<VideoChunk>(2048);
     let (atx, _) = broadcast::channel::<Bytes>(1024);
+    // Cópia do áudio em PCM para gravação e replay.
+    let (pcm_tx, _) = broadcast::channel::<Bytes>(1024);
+    *crate::audio::PCM_TAP.lock().unwrap() = Some(pcm_tx.clone());
+    PRIVACY.store(false, Ordering::Relaxed);
+    crate::audio::MUTE.store(false, Ordering::Relaxed);
 
     let mut _audio_handle = None;
     let audio_fmt = if !o.audio {
@@ -1144,6 +1461,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
     let bytes_out = Arc::new(AtomicU64::new(0));
     let (br_tx, br_rx) = watch::channel(start_br);
+    let (low_br_tx, low_br_rx) = watch::channel(LOW_START);
+    let (vtx_low, _) = broadcast::channel::<VideoChunk>(1024);
+    LOW_LIVE.store(false, Ordering::Relaxed);
 
     let (chat_tx, _) = broadcast::channel::<ChatMsg>(256);
     *CHAT.lock().unwrap() = Some(chat_tx.clone());
@@ -1173,7 +1493,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         async move {
             loop {
                 match rx.recv().await {
-                    Ok(m) if m.ping.is_some() => {} // apontar não entra no histórico do chat
+                    Ok(m) if m.ping.is_some() || m.draw.is_some() => {} // apontar/desenhar não entram no histórico do chat
                     Ok(m) => {
                         if !m.react && m.id != "h" {
                             crate::sounds::play(crate::sounds::Sound::Chat);
@@ -1206,16 +1526,13 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
             }
         }
     };
+    let low_encoder = low_encoder_loop(&o, cap_rx.clone(), enc, cpu_copy, gfx, low_br_rx, vtx_low.clone(), bytes_out.clone(), viewers.clone());
     let encoder = encoder_loop(&o, cap_rx, enc, cpu_copy, br_rx, vtx.clone(), bytes_out.clone(), gfx, viewers.clone());
     let vtx_preview = vtx.clone();
+    let rec_rx = vtx.subscribe();
 
-    let controller = async {
-        if o.auto_bitrate {
-            bitrate_controller(start_br, o.bitrate_mbps, br_tx, viewers.clone()).await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-    };
+    // Qualidade: bitrate automático (se ligado) e versão leve para quem tem a conexão mais fraca.
+    let controller = bitrate_controller(start_br, if o.auto_bitrate { o.bitrate_mbps } else { start_br }, o.auto_bitrate, br_tx, low_br_tx, viewers.clone());
 
     let accept = {
         let ep = ep.clone();
@@ -1225,9 +1542,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         async move {
             while let Some(inc) = ep.accept().await {
                 let (vtx, atx, viewers, password) = (vtx.clone(), atx.clone(), viewers.clone(), password.clone());
-                let chat_tx = chat_tx.clone();
+                let (chat_tx, vtx_low) = (chat_tx.clone(), vtx_low.clone());
                 tokio::spawn(async move {
-                    if let Err(e) = handle_viewer(inc, vtx, atx, chat_tx, audio_fmt, opus, approval, password, viewers).await {
+                    if let Err(e) = handle_viewer(inc, vtx, vtx_low, atx, chat_tx, audio_fmt, opus, approval, password, viewers).await {
                         log(crate::tr!("[espectador] {e:#}", "[viewer] {e:#}"));
                     }
                 });
@@ -1265,6 +1582,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                             wants: vw.wants.load(Ordering::Relaxed),
                             granted: vw.granted.load(Ordering::Relaxed),
                             version: vw.version.clone(),
+                            low: vw.low.load(Ordering::Relaxed),
                         }
                     })
                     .collect();
@@ -1290,6 +1608,8 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     };
 
     let preview = preview_loop(vtx_preview);
+    // Gravação e replay instantâneo (o que os espectadores recebem, sem codificar de novo).
+    let recorder = crate::record::run(o.ffmpeg.clone(), rec_rx, audio_fmt.map(|_| pcm_tx.subscribe()), audio_fmt, o.fps);
 
     // Códigos de resposta (hole punching): abre o firewall deste lado para cada espectador liberado.
     let puncher = async {
@@ -1303,9 +1623,11 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     let res = tokio::select! {
         r = encoder => r,
+        r = low_encoder => r,
         _ = puncher => Ok(()),
         _ = switcher => Ok(()),
         _ = preview => Ok(()),
+        _ = recorder => Ok(()),
         _ = tracker => Ok(()),
         _ = accept => Ok(()),
         _ = stats => Ok(()),
@@ -1318,6 +1640,9 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     };
     *PUNCH.lock().unwrap() = None;
     *SWITCH.lock().unwrap() = None;
+    PRIVACY.store(false, Ordering::Relaxed);
+    crate::audio::MUTE.store(false, Ordering::Relaxed);
+    *crate::audio::PCM_TAP.lock().unwrap() = None;
     DECISIONS.lock().unwrap().clear();
     CONNS.lock().unwrap().clear();
     BANNED.lock().unwrap().clear();
@@ -1354,9 +1679,11 @@ fn new_token() -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_viewer(
     inc: quinn::Incoming,
     vtx: broadcast::Sender<VideoChunk>,
+    vtx_low: broadcast::Sender<VideoChunk>,
     atx: broadcast::Sender<Bytes>,
     chat_tx: broadcast::Sender<ChatMsg>,
     audio_fmt: Option<(u32, u16)>,
@@ -1482,6 +1809,7 @@ async fn handle_viewer(
     let stalled_ms = Arc::new(AtomicU64::new(0));
     let wants = Arc::new(AtomicU8::new(0));
     let granted = Arc::new(AtomicU8::new(granted_bits));
+    let low = Arc::new(AtomicBool::new(false));
     let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
     conn.set_send_window(net::send_window_for(state::host(|h| h.bitrate)));
     viewers.lock().unwrap().insert(
@@ -1495,6 +1823,7 @@ async fn handle_viewer(
             version: version.clone(),
             wants: wants.clone(),
             granted: granted.clone(),
+            low: low.clone(),
         },
     );
     CONNS.lock().unwrap().insert(addr.to_string(), conn.clone());
@@ -1521,14 +1850,23 @@ async fn handle_viewer(
     let injector = Arc::new(Mutex::new(remote::Injector::default()));
 
     let video = {
-        let conn = conn.clone();
+        let (conn, low) = (conn.clone(), low.clone());
         let mut rx = vtx.subscribe();
         async move {
             let mut s = conn.open_uni().await?;
             s.write_all(&[net::STREAM_VIDEO]).await?;
             let mut waiting_keyframe = true;
+            let mut on_low = false;
             loop {
-                match rx.recv().await {
+                // Troca entre a versão normal e a leve (no próximo quadro-chave da outra).
+                let want = low.load(Ordering::Relaxed);
+                if want != on_low && (!want || LOW_LIVE.load(Ordering::Relaxed)) {
+                    rx = if want { vtx_low.subscribe() } else { vtx.subscribe() };
+                    on_low = want;
+                    waiting_keyframe = true;
+                }
+                let Ok(r) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await else { continue };
+                match r {
                     Ok(c) => {
                         // Este espectador está mais de 1 s atrás do encoder: descarta o que está na fila e
                         // recomeça no próximo keyframe (mantém a latência baixa; o bitrate automático reage).
@@ -1589,7 +1927,7 @@ async fn handle_viewer(
 
     // Estatísticas para o viewer: perda de pacotes medida aqui (ele não tem como saber sozinho).
     let stats = {
-        let conn = conn.clone();
+        let (conn, low) = (conn.clone(), low.clone());
         async move {
             let mut s = conn.open_uni().await?;
             s.write_all(&[net::STREAM_STATS]).await?;
@@ -1599,7 +1937,7 @@ async fn handle_viewer(
                 let now = conn.stats().path;
                 let (sent, lost) = (now.sent_packets - prev.sent_packets, now.lost_packets - prev.lost_packets);
                 let loss = if sent > 0 { lost as f64 * 100.0 / sent as f64 } else { 0.0 };
-                let target = state::host(|h| h.bitrate);
+                let target = if low.load(Ordering::Relaxed) { state::host(|h| h.low_bitrate) } else { state::host(|h| h.bitrate) };
                 s.write_all(format!("loss={loss:.2};target={target}\n").as_bytes()).await?;
                 prev = now;
             }
@@ -1612,6 +1950,7 @@ async fn handle_viewer(
     // mudanças de permissão).
     let control_task = {
         let (chat_tx, name, wants, granted, injector) = (chat_tx.clone(), name.clone(), wants.clone(), granted.clone(), injector.clone());
+        let low = low.clone();
         let member_id = member_id.clone();
         async move {
             let Some((mut send, mut lines)) = ctl else {
@@ -1633,11 +1972,17 @@ async fn handle_viewer(
                 control::send(&mut send, &a).await?;
             }
             control::send(&mut send, &roster_json()).await?;
+            if privacy() {
+                control::send(&mut send, &serde_json::json!({ "t": "privacy", "on": true })).await?;
+            }
             if granted_bits != 0 {
                 control::send(&mut send, &serde_json::json!({ "t": "control", "pad": granted_bits & CTL_PAD != 0, "kbm": granted_bits & CTL_KBM != 0 })).await?;
             }
             let mut chat_rx = chat_tx.subscribe();
             let mut open = true;
+            // Avisa o espectador quando ele passa a receber a versão leve (e quando volta).
+            let mut low_sent = false;
+            let mut low_tick = tokio::time::interval(Duration::from_secs(1));
             // Limite de mensagens: 8 a cada 10 s.
             let mut recent: std::collections::VecDeque<Instant> = Default::default();
             // Apontar: no máximo 4 a cada 3 s.
@@ -1657,9 +2002,9 @@ async fn handle_viewer(
                                     continue;
                                 }
                                 let msg = if t == "chat" {
-                                    control::clean_text(v["text"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: false, ping: None })
+                                    control::clean_text(v["text"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: false, ping: None, draw: None })
                                 } else {
-                                    control::clean_react(v["r"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: true, ping: None })
+                                    control::clean_react(v["r"].as_str().unwrap_or("")).map(|text| ChatMsg { id: member_id.clone(), from: name.clone(), text, react: true, ping: None, draw: None })
                                 };
                                 if let Some(m) = msg {
                                     recent.push_back(Instant::now());
@@ -1672,7 +2017,17 @@ async fn handle_viewer(
                                 }
                                 if let (true, Some(p)) = (pings.len() < 4, control::clean_point(&v)) {
                                     pings.push_back(Instant::now());
-                                    let _ = chat_tx.send(ChatMsg { id: member_id.clone(), from: name.clone(), text: String::new(), react: false, ping: Some(p) });
+                                    let _ = chat_tx.send(ChatMsg { id: member_id.clone(), from: name.clone(), text: String::new(), react: false, ping: Some(p), draw: None });
+                                }
+                            }
+                            "draw" => {
+                                // Desenhar: no máximo 3 traços a cada 3 s (divide o limite com apontar).
+                                while pings.front().is_some_and(|t| t.elapsed() > Duration::from_secs(3)) {
+                                    pings.pop_front();
+                                }
+                                if let (true, Some(pts)) = (pings.len() < 3, control::clean_stroke(&v)) {
+                                    pings.push_back(Instant::now());
+                                    let _ = chat_tx.send(ChatMsg { id: member_id.clone(), from: name.clone(), text: String::new(), react: false, ping: None, draw: Some(pts) });
                                 }
                             }
                             "control_req" => {
@@ -1716,6 +2071,13 @@ async fn handle_viewer(
                         Err(broadcast::error::RecvError::Lagged(_)) => control::send(&mut send, &roster_json()).await?,
                         Err(broadcast::error::RecvError::Closed) => roster_rx = None,
                     },
+                    _ = low_tick.tick() => {
+                        let l = low.load(Ordering::Relaxed);
+                        if l != low_sent {
+                            low_sent = l;
+                            control::send(&mut send, &serde_json::json!({ "t": "quality", "low": l })).await?;
+                        }
+                    }
                     n = perm_rx.recv() => {
                         let g = granted.load(Ordering::Relaxed);
                         {

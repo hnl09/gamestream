@@ -87,7 +87,14 @@ fn pal() -> Palette {
 }
 
 /// Abre a interface. `join` = código de sala vindo de um link (entra direto na sala).
-pub fn run(join: Option<String>) -> eframe::Result<()> {
+/// `hidden` = começa só na bandeja (iniciado junto com o Windows).
+/// Começou só na bandeja: o eframe mostra a janela depois do 1º quadro; ela é escondida no 2º.
+static START_HIDDEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn run(join: Option<String>, hidden: bool) -> eframe::Result<()> {
+    if hidden {
+        START_HIDDEN.store(2, std::sync::atomic::Ordering::Relaxed);
+    }
     if join.is_some() {
         *crate::link::PENDING.lock().unwrap() = join;
     }
@@ -97,6 +104,7 @@ pub fn run(join: Option<String>) -> eframe::Result<()> {
             .with_title("GameStream")
             .with_inner_size([640.0, 820.0])
             .with_min_inner_size([520.0, 560.0])
+            .with_visible(!hidden)
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).unwrap_or_default()),
         ..Default::default()
     };
@@ -108,6 +116,7 @@ pub fn run(join: Option<String>) -> eframe::Result<()> {
             let app = App::new();
             // Recebe links abertos enquanto o app está aberto.
             app.rt.spawn(crate::link::serve(cc.egui_ctx.clone()));
+            crate::tray::start(cc.egui_ctx.clone());
             Ok(Box::new(app))
         }),
     )
@@ -431,6 +440,8 @@ struct App {
     preview: bool,
     host_task: Option<Task>,
     live_desc: String,
+    tray_hint_shown: bool,
+    autostart: Option<bool>,
     // viewer
     invite: String,
     view_password: String,
@@ -503,6 +514,8 @@ impl App {
             preview: true,
             host_task: None,
             live_desc: String::new(),
+            tray_hint_shown: false,
+            autostart: None,
             invite: String::new(),
             view_password: String::new(),
             view_out: None,
@@ -925,6 +938,103 @@ impl App {
                 });
             });
 
+            // Privacidade, gravação e replay.
+            card(ui, crate::i18n::t("🎬 Privacidade, gravação e replay"), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if st.privacy {
+                        if ui
+                            .add(egui::Button::new(RichText::new(crate::i18n::t("▶ Voltar a transmitir")).strong().color(Color32::WHITE)).fill(pal().live))
+                            .on_hover_text(crate::i18n::t("Desliga o modo privacidade (Ctrl+F9)"))
+                            .clicked()
+                        {
+                            host::set_privacy(false);
+                        }
+                    } else if ui
+                        .button(crate::i18n::t("🙈 Modo privacidade"))
+                        .on_hover_text(crate::i18n::t("Os espectadores veem \"Volto já\" em vez da sua tela, sem som, até você voltar. Atalho: Ctrl+F9 (funciona dentro do jogo)."))
+                        .clicked()
+                    {
+                        host::set_privacy(true);
+                    }
+                    let rec_label = match &st.recording {
+                        Some((t, _)) => {
+                            let s = t.elapsed().as_secs();
+                            crate::tr!("⏹ Parar gravação ({:02}:{:02})", "⏹ Stop recording ({:02}:{:02})", s / 60, s % 60)
+                        }
+                        None => crate::i18n::t("⏺ Gravar").to_string(),
+                    };
+                    if ui
+                        .button(rec_label)
+                        .on_hover_text(crate::i18n::t("Grava em MP4 exatamente o que os espectadores recebem, sem pesar mais na placa de vídeo. Arquivos em Vídeos\\GameStream."))
+                        .clicked()
+                    {
+                        host::toggle_record();
+                    }
+                    let replay_on = crate::settings::replay();
+                    if ui
+                        .add_enabled(replay_on, egui::Button::new(crate::i18n::t("💾 Salvar replay (30 s)")))
+                        .on_hover_text(crate::i18n::t("Salva os últimos 30 segundos da transmissão. Atalho: Ctrl+F10 (funciona dentro do jogo)."))
+                        .clicked()
+                    {
+                        host::save_replay();
+                    }
+                });
+                if st.privacy {
+                    ui.label(RichText::new(crate::i18n::t("🙈 Modo privacidade ligado: os espectadores veem \"Volto já\" (sem imagem e sem som).")).strong().color(pal().live));
+                }
+                if st.recording.is_some() {
+                    ui.label(RichText::new(crate::i18n::t("● Gravando")).small().color(pal().live));
+                }
+                ui.horizontal(|ui| {
+                    let mut replay_on = crate::settings::replay();
+                    if ui
+                        .checkbox(&mut replay_on, crate::i18n::t("Replay instantâneo"))
+                        .on_hover_text(crate::i18n::t("Guarda sempre os últimos 30 segundos na memória (cerca de 80 MB a 20 Mbps) para salvar uma jogada na hora."))
+                        .changed()
+                    {
+                        crate::settings::set_replay(replay_on);
+                    }
+                    if replay_on && st.replay_secs > 0 {
+                        hint(ui, &crate::tr!("{} s guardados", "{} s stored", st.replay_secs));
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .small_button(crate::i18n::t("📁 Trocar pasta"))
+                            .on_hover_text(crate::i18n::t("Escolhe onde salvar as gravações e os replays"))
+                            .clicked()
+                        {
+                            let pick = rfd::FileDialog::new()
+                                .set_title(crate::i18n::t("Onde salvar as gravações e os replays"))
+                                .set_directory(crate::record::display_dir())
+                                .pick_folder();
+                            if let Some(d) = pick {
+                                let d = d.display().to_string();
+                                state::log(crate::tr!("[gravação] vídeos serão salvos em {d}", "[recording] videos will be saved to {d}"));
+                                crate::settings::set_videos_dir(Some(d));
+                            }
+                        }
+                        if ui.small_button(crate::i18n::t("📂 Abrir pasta")).clicked() {
+                            let dir = crate::record::videos_dir();
+                            let _ = std::fs::create_dir_all(&dir);
+                            let target = st.last_saved.clone().filter(|p| std::path::Path::new(p).exists());
+                            let _ = match target {
+                                Some(p) => std::process::Command::new("explorer").arg(format!("/select,{p}")).spawn(),
+                                None => std::process::Command::new("explorer").arg(&dir).spawn(),
+                            };
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    hint(ui, &crate::tr!("Salvando em: {}", "Saving to: {}", crate::record::display_dir().display()));
+                    if crate::settings::videos_dir().is_some()
+                        && ui.small_button(crate::i18n::t("Usar a pasta padrão")).on_hover_text(crate::i18n::t("Volta a salvar em Vídeos\\GameStream")).clicked()
+                    {
+                        crate::settings::set_videos_dir(None);
+                    }
+                });
+                hint(ui, crate::i18n::t("Atalhos durante o jogo: Ctrl+F9 = modo privacidade · Ctrl+F10 = salvar replay."));
+            });
+
             card(ui, crate::i18n::t("Convite"), |ui| {
                 if let Some(room) = &st.room {
                     ui.horizontal(|ui| {
@@ -1049,6 +1159,17 @@ impl App {
                 if st.preview_open {
                     ui.label(RichText::new(crate::i18n::t("🖥  Pré-visualização local (sem áudio)")).color(pal().muted));
                 }
+                if st.low_active {
+                    ui.label(
+                        RichText::new(crate::tr!(
+                            "🐢 Versão leve ativa (720p, 30 FPS, {} Mbps) para quem tem a conexão mais fraca",
+                            "🐢 Light version active (720p, 30 FPS, {} Mbps) for weaker connections",
+                            st.low_bitrate
+                        ))
+                        .small()
+                        .color(pal().muted),
+                    );
+                }
                 if st.viewers.is_empty() {
                     hint(ui, crate::i18n::t("Nenhum espectador conectado. Compartilhe o convite e a senha."));
                 }
@@ -1064,6 +1185,11 @@ impl App {
                                     ui.label(RichText::new(&v.name).strong());
                                     if v.name != v.ip {
                                         ui.label(RichText::new(&v.ip).small().color(pal().muted));
+                                    }
+                                    if v.low {
+                                        ui.label(RichText::new(crate::i18n::t("🐢 versão leve")).small().color(warn)).on_hover_text(crate::i18n::t(
+                                            "A conexão dele está mais fraca que a dos outros: ele recebe uma versão mais leve (720p, 30 FPS) e os outros continuam na qualidade normal. Volta sozinho quando a conexão melhorar.",
+                                        ));
                                     }
                                     if v.version.is_empty() {
                                         ui.label(RichText::new(crate::i18n::t("versão antiga")).small().color(warn))
@@ -1293,6 +1419,12 @@ impl App {
                     ui.label(RichText::new(&vs.peer).small().color(pal().muted));
                 }
             });
+            if vs.privacy {
+                ui.label(RichText::new(crate::i18n::t("⏸ O transmissor pausou a imagem por um instante (modo privacidade). Volta já.")).strong().color(Color32::from_rgb(255, 190, 90)));
+            }
+            if vs.low {
+                ui.label(RichText::new(crate::i18n::t("🐢 Sua conexão está mais fraca que a dos outros: você recebe a versão leve (720p, 30 FPS) para não travar. Volta à qualidade normal sozinho.")).small().color(pal().muted));
+            }
             if vs.verified {
                 ui.label(crate::tr!("🔒 Conexão criptografada · identidade do transmissor verificada · código {}", "🔒 Encrypted connection · streamer identity verified · code {}", vs.code));
             } else {
@@ -1943,6 +2075,38 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(250));
+        match START_HIDDEN.load(std::sync::atomic::Ordering::Relaxed) {
+            2 => {
+                START_HIDDEN.store(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
+            }
+            1 => {
+                START_HIDDEN.store(0, std::sync::atomic::Ordering::Relaxed);
+                crate::tray::hide_main();
+            }
+            _ => {}
+        }
+        // Fechar a janela: fica na bandeja (como o Discord), a não ser que a pessoa tenha pedido "Sair"
+        // pelo menu da bandeja ou desligado a opção. Saindo de verdade: encerra a transmissão/sessão.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let quitting = crate::tray::QUIT.load(std::sync::atomic::Ordering::Relaxed);
+            if !quitting && crate::settings::close_to_tray() && crate::tray::active() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                crate::tray::hide_main();
+                if !self.tray_hint_shown {
+                    self.tray_hint_shown = true;
+                    state::log(crate::i18n::t("O GameStream continua aberto na bandeja (perto do relógio). Para sair, clique com o botão direito no ícone e em \"Sair\"."));
+                }
+                return;
+            }
+            if let Some(t) = self.host_task.as_mut().filter(|t| t.running()) {
+                t.stop();
+            }
+            if let Some(t) = self.view_task.as_mut().filter(|t| t.running()) {
+                t.stop();
+            }
+            crate::tray::remove();
+        }
         if self.auto_update(ctx) {
             return;
         }
@@ -2016,6 +2180,24 @@ impl eframe::App for App {
                                 if snd {
                                     crate::sounds::play(crate::sounds::Sound::Join);
                                 }
+                            }
+                            let mut to_tray = crate::settings::close_to_tray();
+                            if ui
+                                .checkbox(&mut to_tray, crate::i18n::t("🗕 Fechar deixa na bandeja"))
+                                .on_hover_text(crate::i18n::t("Fechar a janela deixa o GameStream perto do relógio (continua transmitindo ou assistindo). Para sair, botão direito no ícone > Sair."))
+                                .changed()
+                            {
+                                crate::settings::set_close_to_tray(to_tray);
+                            }
+                            let auto = *self.autostart.get_or_insert_with(crate::settings::autostart);
+                            let mut a = auto;
+                            if ui
+                                .checkbox(&mut a, crate::i18n::t("🚀 Iniciar com o Windows"))
+                                .on_hover_text(crate::i18n::t("Abre o GameStream na bandeja quando você liga o PC (para ver quem está ao vivo nas salas recentes)."))
+                                .changed()
+                            {
+                                crate::settings::set_autostart(a);
+                                self.autostart = Some(a);
                             }
                             ui.separator();
                             ui.label(RichText::new(crate::i18n::t("Tema")).small().color(pal().muted));

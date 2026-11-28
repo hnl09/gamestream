@@ -36,6 +36,12 @@ struct Extra {
     mute_sounds: bool,
     /// Não mostrar as câmeras dos outros.
     hide_cams: bool,
+    /// Fechar a janela encerra o app (em vez de ficar na bandeja, perto do relógio).
+    close_quits: bool,
+    /// Replay instantâneo desligado (por padrão guarda os últimos 30 s enquanto transmite).
+    no_replay: bool,
+    /// Pasta escolhida para gravações e replays (vazio = Vídeos\GameStream).
+    videos_dir: String,
 }
 
 const MAX_TRUSTED: usize = 200;
@@ -113,6 +119,9 @@ fn init() {
         x.prefs = saved["prefs"].clone();
         x.mute_sounds = saved["sounds"].as_bool() == Some(false);
         x.hide_cams = saved["show_cams"].as_bool() == Some(false);
+        x.close_quits = saved["close_to_tray"].as_bool() == Some(false);
+        x.no_replay = saved["replay"].as_bool() == Some(false);
+        x.videos_dir = saved["videos_dir"].as_str().unwrap_or("").to_string();
         x.trusted = saved["trusted"]
             .as_array()
             .map(|a| {
@@ -141,7 +150,7 @@ fn init() {
 }
 
 fn save() {
-    let (nick, recent, prefs, trusted, sounds, show_cams) = {
+    let (nick, recent, prefs, trusted, sounds, show_cams, to_tray, replay, videos_dir) = {
         let x = EXTRA.lock().unwrap();
         let trusted: Vec<serde_json::Value> = x.trusted.iter().map(|(k, n)| serde_json::json!({ "k": k, "name": n })).collect();
         let recent: Vec<serde_json::Value> = x
@@ -149,7 +158,7 @@ fn save() {
             .iter()
             .map(|r| serde_json::json!({ "code": r.code, "name": r.name, "last": r.last }))
             .collect();
-        (x.nick.clone(), recent, x.prefs.clone(), trusted, !x.mute_sounds, !x.hide_cams)
+        (x.nick.clone(), recent, x.prefs.clone(), trusted, !x.mute_sounds, !x.hide_cams, !x.close_quits, !x.no_replay, x.videos_dir.clone())
     };
     let v = serde_json::json!({
         "lang": if is_en() { "en" } else { "pt" },
@@ -160,6 +169,9 @@ fn save() {
         "trusted": trusted,
         "sounds": sounds,
         "show_cams": show_cams,
+        "close_to_tray": to_tray,
+        "replay": replay,
+        "videos_dir": videos_dir,
     });
     let p = path();
     if let Some(dir) = p.parent() {
@@ -230,6 +242,65 @@ pub fn set_show_cams(on: bool) {
     init();
     EXTRA.lock().unwrap().hide_cams = !on;
     save();
+}
+
+/// Fechar a janela deixa o GameStream na bandeja (padrão: sim, como o Discord).
+pub fn close_to_tray() -> bool {
+    init();
+    !EXTRA.lock().unwrap().close_quits
+}
+
+pub fn set_close_to_tray(on: bool) {
+    init();
+    EXTRA.lock().unwrap().close_quits = !on;
+    save();
+}
+
+/// Replay instantâneo (guarda os últimos 30 s enquanto transmite; padrão: sim).
+pub fn replay() -> bool {
+    init();
+    !EXTRA.lock().unwrap().no_replay
+}
+
+pub fn set_replay(on: bool) {
+    init();
+    EXTRA.lock().unwrap().no_replay = !on;
+    save();
+}
+
+/// Pasta escolhida para gravações e replays (None = a padrão, Vídeos\GameStream).
+pub fn videos_dir() -> Option<String> {
+    init();
+    Some(EXTRA.lock().unwrap().videos_dir.clone()).filter(|d| !d.is_empty())
+}
+
+pub fn set_videos_dir(dir: Option<String>) {
+    init();
+    EXTRA.lock().unwrap().videos_dir = dir.unwrap_or_default();
+    save();
+}
+
+/// Iniciar com o Windows (na bandeja). Fica no registro do usuário, não no settings.json.
+pub fn autostart() -> bool {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("reg")
+        .args(["query", RUN_KEY, "/v", "GameStream"])
+        .creation_flags(0x0800_0000)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+pub fn set_autostart(on: bool) {
+    use std::os::windows::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else { return };
+    let args: Vec<String> = if on {
+        vec!["add".into(), RUN_KEY.into(), "/v".into(), "GameStream".into(), "/d".into(), format!("\"{}\" --tray", exe.display()), "/f".into()]
+    } else {
+        vec!["delete".into(), RUN_KEY.into(), "/v".into(), "GameStream".into(), "/f".into()]
+    };
+    let _ = std::process::Command::new("reg").args(args).creation_flags(0x0800_0000).output();
 }
 
 /// Sons de aviso ligados (padrão: sim).

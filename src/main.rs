@@ -14,11 +14,13 @@ mod link;
 mod net;
 mod procaudio;
 mod remote;
+mod record;
 mod room;
 mod settings;
 mod sounds;
 mod sources;
 mod state;
+mod tray;
 mod updater;
 mod viewer;
 
@@ -122,6 +124,18 @@ enum Cmd {
     },
 }
 
+/// "x,y;x,y;..." (pontos de 0 a 1) para o comando "draw" do terminal.
+fn parse_points(s: &str) -> Vec<(f32, f32)> {
+    s.split(';')
+        .filter_map(|p| {
+            let (x, y) = p.trim().split_once(',')?;
+            Some((x.parse().ok()?, y.parse().ok()?))
+        })
+        .filter(|(x, y): &(f32, f32)| (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y))
+        .take(control::MAX_STROKE)
+        .collect()
+}
+
 fn main() {
     // Provedor de criptografia único para todo o app (QUIC, HTTPS e WebSocket).
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -135,12 +149,14 @@ fn main() {
             return;
         }
         updater::cleanup_old();
-        if let Err(e) = gui::run(Some(code)) {
+        if let Err(e) = gui::run(Some(code), false) {
             eprintln!("Erro na interface: {e}");
         }
         return;
     }
-    if std::env::args().len() > 1 {
+    // Iniciado junto com o Windows: só o ícone na bandeja.
+    let tray_start = std::env::args().nth(1).as_deref() == Some("--tray") && std::env::args().len() == 2;
+    if std::env::args().len() > 1 && !tray_start {
         // Rodando pelo terminal: reaproveita o console de quem chamou.
         // Só se a entrada/saída não estiverem redirecionadas (pipe/arquivo): anexar ao console
         // nesse caso trocaria os handles redirecionados pelos do console.
@@ -156,8 +172,13 @@ fn main() {
             std::process::exit(1);
         }
     } else {
+        // Já aberto (talvez escondido na bandeja): mostra aquele em vez de abrir outro. Depois de uma
+        // atualização, o app antigo está fechando: não manda nada para ele.
+        if updater::just_updated_to().is_none() && link::forward_to_running("show") {
+            return;
+        }
         updater::cleanup_old();
-        if let Err(e) = gui::run(None) {
+        if let Err(e) = gui::run(None, tray_start) {
             eprintln!("Erro na interface: {e}");
         }
     }
@@ -302,6 +323,8 @@ fn cli() -> Result<()> {
                     } else if let Some(n) = code.strip_prefix("monitor ").and_then(|n| n.trim().parse::<u32>().ok()) {
                         // Troca de fonte durante a transmissão: "monitor 2" ou "window <parte do título>".
                         let _ = host::switch_source(sources::Source::Monitor(n.saturating_sub(1)));
+                    } else if let Some(p) = code.strip_prefix("draw ") {
+                        host::send_draw(parse_points(p));
                     } else if let Some(t) = code.strip_prefix("chat ") {
                         host::send_chat(t);
                     } else if let Some(r) = code.strip_prefix("react ") {
@@ -321,6 +344,12 @@ fn cli() -> Result<()> {
                         host::set_camera(Some(String::new()));
                     } else if code == "cam off" {
                         host::set_camera(None);
+                    } else if code == "privacy on" || code == "privacy off" {
+                        host::set_privacy(code == "privacy on");
+                    } else if code == "record" {
+                        host::toggle_record();
+                    } else if code == "replay" {
+                        host::save_replay();
                     } else if let Some(n) = code.strip_prefix("cam hide ") {
                         cam::hide(n.trim());
                     } else if let Some(n) = code.strip_prefix("cam show ") {
@@ -365,7 +394,9 @@ fn cli() -> Result<()> {
                 let mut line = String::new();
                 while std::io::stdin().read_line(&mut line).is_ok_and(|n| n > 0) {
                     let cmd = line.trim().trim_start_matches('\u{feff}');
-                    if let Some(t) = cmd.strip_prefix("chat ") {
+                    if let Some(p) = cmd.strip_prefix("draw ") {
+                        viewer::send_draw(parse_points(p));
+                    } else if let Some(t) = cmd.strip_prefix("chat ") {
                         viewer::send_chat(t);
                     } else if let Some(r) = cmd.strip_prefix("react ") {
                         viewer::send_react(r.trim());

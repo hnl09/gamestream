@@ -96,7 +96,20 @@ ASSISTIR
      você; para ver de novo, clique em "Mostrar" no card da câmera.
   7. Link de um clique: quem transmite clica em "🔗 Copiar link" (ao lado do
      código da sala) e manda no Discord; quem clica entra direto na sala.
-  8. Se a conexão cair, o aplicativo reconecta sozinho (até 3 minutos) na
+  8. Durante a transmissão (card "Privacidade, gravação e replay"):
+       - Modo privacidade (Ctrl+F9, funciona dentro do jogo): quem assiste vê
+         "Volto já" no lugar da sua tela, sem som, até você apertar de novo.
+       - Gravar: salva em MP4 o que os espectadores recebem, sem pesar mais na
+         placa de vídeo. Replay: Ctrl+F10 salva os últimos 30 segundos.
+         Os arquivos ficam em Vídeos\GameStream (abra com o VLC se o Windows
+         pedir a extensão HEVC).
+     Quem assiste pode desenhar: segure o botão direito e arraste na janela do
+     vídeo (um clique simples aponta). Se a conexão de alguém for mais fraca
+     que a dos outros, só essa pessoa recebe uma versão mais leve (720p).
+  9. Fechar a janela deixa o GameStream na bandeja (perto do relógio); para
+     sair, clique com o botão direito no ícone e em "Sair". No menu ⚙ dá para
+     escolher "Iniciar com o Windows".
+  10. Se a conexão cair, o aplicativo reconecta sozinho (até 3 minutos) na
      mesma janela de vídeo. As salas em que você entrou ficam em "Salas
      recentes" para entrar de novo com um clique.
      "Áudio recebido" (na aba Assistir) mostra se o som está chegando. Se

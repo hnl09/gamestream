@@ -6,6 +6,7 @@
 --   * I: fixa as estatísticas (ping, FPS, perda, Mbps) no canto da tela.
 --   * Enter: escrever no chat · 1 a 6: reações (aparecem para todos na hora).
 --   * Botão direito: aponta um lugar no vídeo para todos (some em ~1 s).
+--   * Segurar o botão direito e arrastar: desenha um traço rápido para todos (some em ~2,5 s).
 --   * Painel no canto inferior direito (aparece ao mexer o mouse): som, volume, zoom, tela cheia.
 -- O volume é guardado em user-data/gs/* e o GameStream (que toca o áudio) acompanha pela IPC.
 
@@ -438,6 +439,36 @@ mp.register_script_message("gs-ping", function(from, x, y)
     if #pings >= 12 then table.remove(pings, 1) end
     pings[#pings + 1] = { from = from or "", x = x, y = y, t = mp.get_time() }
 end)
+-- Desenhos rápidos (traços): { from, pts = {{x, y}...}, t }
+local strokes = {}
+local DRAW_SECS = 2.5
+mp.register_script_message("gs-draw", function(from, s)
+    local pts = {}
+    for x, y in tostring(s or ""):gmatch("([%d%.]+),([%d%.]+)") do
+        pts[#pts + 1] = { tonumber(x), tonumber(y) }
+    end
+    if #pts < 2 then return end
+    if #strokes >= 12 then table.remove(strokes, 1) end
+    strokes[#strokes + 1] = { from = from or "", pts = pts, t = mp.get_time() }
+end)
+local drawing = nil -- traço sendo desenhado agora: { pts = {{u, v}}, x0, y0, moved }
+
+-- Modo privacidade do transmissor: "Volto já" cobrindo o vídeo.
+local privacy = nil -- nome do transmissor quando ligado
+mp.register_script_message("gs-privacy", function(on, host)
+    privacy = (on == "1") and (host or "") or nil
+end)
+
+-- Linha (traço) em ASS: ida e volta pelo mesmo caminho, só o contorno aparece.
+local function polyline(pts, c, width, alpha)
+    if #pts < 2 then return "" end
+    local path = { string.format("m %d %d", pts[1][1], pts[1][2]) }
+    for i = 2, #pts do path[#path + 1] = string.format("l %d %d", pts[i][1], pts[i][2]) end
+    for i = #pts - 1, 1, -1 do path[#path + 1] = string.format("l %d %d", pts[i][1], pts[i][2]) end
+    return string.format("{\\an7\\pos(0,0)\\bord%.1f\\shad0\\1a&HFF&\\3c%s\\3a&H%02X&\\p1}%s{\\p0}",
+        width, c, alpha or 0, table.concat(path, " "))
+end
+
 -- Avatares de quem está na sala (vêm do GameStream como JSON). Fotos: imagens BGRA desenhadas com
 -- overlay-add; quem não tem foto ganha um círculo colorido com a inicial.
 local utils = require("mp.utils")
@@ -592,6 +623,58 @@ local function render_social()
     end
     pings = keep_p
 
+    -- Traços desenhados (de todo mundo) e o que você está desenhando agora.
+    local keep_s = {}
+    for _, st in ipairs(strokes) do
+        local age = now - st.t
+        if age < DRAW_SECS then
+            keep_s[#keep_s + 1] = st
+            local a = age > DRAW_SECS - 0.8 and math.floor((age - (DRAW_SECS - 0.8)) / 0.8 * 255) or 0
+            local pts = {}
+            for i, p in ipairs(st.pts) do pts[i] = { d.ml + p[1] * vw, d.mt + p[2] * vh } end
+            local c = name_color(st.from)
+            ass[#ass + 1] = polyline(pts, "&H000000&", 5, math.min(255, a + 60))
+            ass[#ass + 1] = polyline(pts, c, 3, a)
+            local last = pts[#pts]
+            ass[#ass + 1] = string.format("{\\an1\\pos(%d,%d)\\fs15\\fnSegoe UI\\b1\\bord2\\shad0\\3c&H000000&\\1c%s\\alpha&H%02X&}%s",
+                last[1] + 6, last[2] - 6, C_TXT, a, esc(st.from))
+        end
+    end
+    strokes = keep_s
+    if drawing then
+        -- Amostra a posição do mouse enquanto o botão direito está pressionado.
+        local u, v = (mouse.x - d.ml) / vw, (mouse.y - d.mt) / vh
+        if u >= 0 and u <= 1 and v >= 0 and v <= 1 then
+            local lp = drawing.pts[#drawing.pts]
+            if not lp or math.abs((u - lp[1]) * vw) + math.abs((v - lp[2]) * vh) > 6 then
+                if #drawing.pts < 64 then drawing.pts[#drawing.pts + 1] = { u, v } end
+            end
+        end
+        if math.abs(mouse.x - drawing.x0) + math.abs(mouse.y - drawing.y0) > 10 then drawing.moved = true end
+        if drawing.moved then
+            local pts = {}
+            for i, p in ipairs(drawing.pts) do pts[i] = { d.ml + p[1] * vw, d.mt + p[2] * vh } end
+            ass[#ass + 1] = polyline(pts, C_ACCENT, 3, 0)
+        end
+    end
+
+    -- Modo privacidade: quem assiste vê "Volto já" no lugar do vídeo; o transmissor, um aviso.
+    if privacy then
+        if mode == "preview" then
+            ass[#ass + 1] = string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H1C1C24&\\1a&H30&\\p1}m 0 0 l %d 0 %d 64 0 64{\\p0}", d.w, d.w)
+            ass[#ass + 1] = string.format("{\\an5\\pos(%d,32)\\fs20\\fnSegoe UI\\b1\\bord0\\shad0\\1c%s}%s", d.w / 2, C_TXT,
+                L("⏸ Modo privacidade ligado: os espectadores veem \"Volto já\" (Ctrl+F9 desliga)",
+                  "⏸ Privacy mode on: viewers see \"Be right back\" (Ctrl+F9 turns it off)"))
+        else
+            ass[#ass + 1] = string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H1C1C24&\\1a&H00&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}", d.w, d.w, d.h, d.h)
+            ass[#ass + 1] = string.format("{\\an5\\pos(%d,%d)\\fs64\\fnSegoe UI\\b1\\bord0\\shad0\\1c%s}%s", d.w / 2, d.h / 2 - 24, C_TXT,
+                L("⏸ Volto já", "⏸ Be right back"))
+            local who = privacy ~= "" and esc(privacy) or L("O transmissor", "The streamer")
+            ass[#ass + 1] = string.format("{\\an5\\pos(%d,%d)\\fs22\\fnSegoe UI\\bord0\\shad0\\1c%s}%s", d.w / 2, d.h / 2 + 36, C_DIM,
+                who .. L(" pausou a imagem por um instante.", " paused the picture for a moment."))
+        end
+    end
+
     social.data = table.concat(ass, "\n")
     social:update()
 end
@@ -614,16 +697,31 @@ local function open_chat()
 end
 mp.add_forced_key_binding("ENTER", "gs_chat", open_chat)
 
--- Botão direito: aponta (fora do painel; o ponto é enviado em relação ao vídeo).
-mp.add_forced_key_binding("MBTN_RIGHT", "gs_ping", function()
+-- Botão direito: clique = aponta; segurar e arrastar = desenha um traço (fora do painel; os pontos
+-- são enviados em relação ao vídeo).
+mp.add_forced_key_binding("MBTN_RIGHT", "gs_ping", function(e)
     local d = dims()
-    if not d or panel_hit(mouse.x, mouse.y) then return end
+    if not d then return end
     local vw, vh = d.w - d.ml - d.mr, d.h - d.mt - d.mb
     if vw <= 0 or vh <= 0 then return end
-    local u, v = (mouse.x - d.ml) / vw, (mouse.y - d.mt) / vh
-    if u < 0 or u > 1 or v < 0 or v > 1 then return end
-    mp.commandv("script-message", "gs-out-ping", string.format("%.4f", u), string.format("%.4f", v))
-end)
+    if e.event == "down" then
+        if panel_hit(mouse.x, mouse.y) then return end
+        local u, v = (mouse.x - d.ml) / vw, (mouse.y - d.mt) / vh
+        if u < 0 or u > 1 or v < 0 or v > 1 then return end
+        drawing = { pts = { { u, v } }, x0 = mouse.x, y0 = mouse.y, moved = false }
+    elseif e.event == "up" and drawing then
+        local st = drawing
+        drawing = nil
+        if st.moved and #st.pts >= 2 then
+            local parts = {}
+            for i, p in ipairs(st.pts) do parts[i] = string.format("%.4f,%.4f", p[1], p[2]) end
+            mp.commandv("script-message", "gs-out-draw", table.concat(parts, ";"))
+        else
+            local p = st.pts[1]
+            mp.commandv("script-message", "gs-out-ping", string.format("%.4f", p[1]), string.format("%.4f", p[2]))
+        end
+    end
+end, { complex = true })
 mp.add_forced_key_binding("KP_ENTER", "gs_chat_kp", open_chat)
 for i, r in ipairs(REACTIONS) do
     mp.add_forced_key_binding(tostring(i), "gs_react_" .. i, function()

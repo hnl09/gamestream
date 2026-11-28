@@ -43,8 +43,12 @@ pub fn register_scheme() {
 }
 
 fn pipe_name() -> String {
+    use std::hash::{Hash, Hasher};
     let user: String = std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    format!(r"\\.\pipe\gamestream-ui-{user}")
+    // Um GameStream por perfil (APPDATA): perfis/testes separados não se atrapalham.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::env::var("APPDATA").unwrap_or_default().to_lowercase().hash(&mut h);
+    format!(r"\\.\pipe\gamestream-ui-{user}-{:08x}", h.finish() as u32)
 }
 
 /// Manda o código para um GameStream já aberto. `true` se havia um aberto para receber.
@@ -61,7 +65,16 @@ pub fn forward_to_running(code: &str) -> bool {
 pub async fn serve(ctx: eframe::egui::Context) {
     use tokio::net::windows::named_pipe::ServerOptions;
     let name = pipe_name();
-    let Ok(mut server) = ServerOptions::new().first_pipe_instance(true).create(&name) else { return };
+    // Logo depois de uma atualização o app antigo pode ainda estar fechando: tenta por alguns segundos.
+    let mut server = None;
+    for _ in 0..20 {
+        if let Ok(s) = ServerOptions::new().first_pipe_instance(true).create(&name) {
+            server = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let Some(mut server) = server else { return };
     loop {
         if server.connect().await.is_err() {
             return;
@@ -72,8 +85,11 @@ pub async fn serve(ctx: eframe::egui::Context) {
         let mut line = String::new();
         let mut rd = tokio::io::BufReader::new(client);
         if tokio::time::timeout(std::time::Duration::from_secs(2), rd.read_line(&mut line)).await.is_ok() {
-            if let Some(code) = crate::room::parse_code(line.trim()) {
+            if line.trim() == "show" {
+                crate::tray::show_main();
+            } else if let Some(code) = crate::room::parse_code(line.trim()) {
                 *PENDING.lock().unwrap() = Some(code);
+                crate::tray::show_main();
                 ctx.request_repaint();
             }
         }

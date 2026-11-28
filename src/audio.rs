@@ -267,6 +267,11 @@ where
     )?)
 }
 
+/// Cópia do áudio misturado em PCM 16 bits (10 ms por pacote), para gravação e replay.
+pub static PCM_TAP: std::sync::LazyLock<Mutex<Option<broadcast::Sender<Bytes>>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+/// Modo privacidade: manda silêncio (o relógio do áudio continua andando).
+pub static MUTE: AtomicBool = AtomicBool::new(false);
+
 /// Começa a capturar: a fonte principal e, opcionalmente, o microfone, misturados a cada 10 ms.
 /// Envia pacotes já enquadrados (`[u32 len][pcm i16]`), 48 kHz estéreo. Retorna (pipeline, rate, canais).
 /// Bitrate do Opus: 160 kbps estéreo, faixa considerada transparente em testes de audição.
@@ -346,6 +351,16 @@ fn mixer(sources: Vec<(Queue, f32)>, tx: broadcast::Sender<Bytes>, stop: Arc<Ato
                         }
                     }
                 }
+            }
+            if MUTE.load(Ordering::Relaxed) {
+                mix.iter_mut().for_each(|s| *s = 0.0);
+            }
+            if let Some(tap) = PCM_TAP.lock().unwrap().as_ref().filter(|t| t.receiver_count() > 0) {
+                let mut pcm = Vec::with_capacity(samples * 2);
+                for &s in &mix {
+                    pcm.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+                }
+                let _ = tap.send(Bytes::from(pcm));
             }
             let out = if let Some(enc) = opus.as_mut() {
                 mix.iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));

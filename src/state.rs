@@ -50,6 +50,17 @@ pub struct HostStatus {
     /// Código da sala no servidor de encontro (ex.: "KX7-92B") e se ela está conectada.
     pub room: Option<String>,
     pub room_online: bool,
+    /// Modo privacidade: os espectadores veem "Volto já" em vez da tela (e sem som).
+    pub privacy: bool,
+    /// Gravando: (quando começou, arquivo).
+    pub recording: Option<(std::time::Instant, String)>,
+    /// Segundos guardados no replay instantâneo (0 = desligado/vazio).
+    pub replay_secs: u32,
+    /// Último vídeo salvo (gravação ou replay), para "Abrir pasta".
+    pub last_saved: Option<String>,
+    /// Versão leve (720p) rodando para quem tem conexão fraca, e o bitrate dela.
+    pub low_active: bool,
+    pub low_bitrate: u32,
 }
 
 /// Uma amostra das estatísticas (para o gráfico da conexão).
@@ -90,6 +101,8 @@ pub struct ViewerRow {
     pub granted: u8,
     /// Versão do GameStream do espectador (vazio = versão antiga, sem chat/controle).
     pub version: String,
+    /// Recebendo a versão leve (720p) por causa da conexão.
+    pub low: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -140,6 +153,10 @@ pub struct ViewStatus {
     /// A sua câmera está ligada (e um erro dela, se houver).
     pub cam_on: bool,
     pub cam_error: Option<String>,
+    /// O transmissor ligou o modo privacidade ("Volto já").
+    pub privacy: bool,
+    /// Recebendo a versão leve (720p) por causa da sua conexão.
+    pub low: bool,
 }
 
 /// Números da transmissão para quem assiste (atualizados a cada segundo).

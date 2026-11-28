@@ -40,6 +40,11 @@ Vídeo HEVC acelerado pela placa de vídeo, conexão direta e criptografada entr
 - **Link de um clique**: "Copiar link" ao lado do código da sala gera um link https; quem clica (no Discord, por exemplo) abre o GameStream já entrando na sala. Se o app já estiver aberto, ele troca para a sala do link.
 - **Gráfico da conexão**: ping, perda de pacotes, taxa e FPS dos últimos 3 minutos para quem assiste; taxa de saída e bitrate alvo para quem transmite.
 - **Sons de aviso** discretos quando alguém entra, pede para jogar ou manda mensagem (desligáveis no menu ⚙).
+- **Modo privacidade** (Ctrl+F9, funciona dentro do jogo): os espectadores veem "Volto já" em vez da sua tela, sem som, até você apertar de novo. Nada da tela sai do PC nesse tempo (nem para a gravação).
+- **Gravar e replay instantâneo**: "⏺ Gravar" salva em MP4 exatamente o que os espectadores recebem, sem pesar mais na placa de vídeo (o vídeo já está comprimido). O replay guarda sempre os últimos 30 segundos; Ctrl+F10 salva a jogada. Arquivos em `Vídeos\GameStream` (vídeo HEVC: toca no VLC ou no Windows com a extensão HEVC).
+- **Desenhar na tela**: segure o botão direito e arraste para riscar uma seta ou um círculo que todos veem por ~2,5 s (um clique simples continua apontando).
+- **Qualidade por espectador**: se só um amigo tem a conexão fraca, só ele recebe uma versão mais leve (720p, 30 FPS, feita por um segundo encoder que só liga quando precisa); os outros continuam em alta. Quando a conexão dele melhora, ele volta sozinho.
+- **Bandeja do sistema**: fechar a janela deixa o GameStream perto do relógio (continua transmitindo ou assistindo); dá para iniciar com o Windows (menu ⚙) para ver quem está ao vivo nas salas recentes.
 - **Economia de GPU**: sem ninguém assistindo (e sem a pré-visualização aberta), a codificação pausa sozinha e volta quando alguém entra.
 - **Reconexão automática**: se a conexão cair, o espectador volta sozinho em alguns segundos, na mesma janela de vídeo e sem passar de novo pela sala de espera.
 - **Salas recentes**: as salas em que você entrou ficam na aba Assistir, com a foto de quem transmite e o selo **AO VIVO** quando a pessoa está transmitindo; entre com um clique.

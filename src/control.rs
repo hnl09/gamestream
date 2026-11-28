@@ -40,11 +40,16 @@ pub struct ChatMsg {
     pub react: bool,
     /// Apontar na tela: posição no vídeo (0..1 na largura e na altura). Não entra no chat.
     pub ping: Option<(f32, f32)>,
+    /// Desenho rápido na tela (traço com pontos 0..1). Some em ~2,5 s. Não entra no chat.
+    pub draw: Option<Vec<(f32, f32)>>,
 }
 
 impl ChatMsg {
     pub fn to_json(&self) -> Value {
-        if let Some((x, y)) = self.ping {
+        if let Some(pts) = &self.draw {
+            let pts: Vec<[f32; 2]> = pts.iter().map(|&(x, y)| [x, y]).collect();
+            json!({ "t": "draw", "id": self.id, "from": self.from, "pts": pts })
+        } else if let Some((x, y)) = self.ping {
             json!({ "t": "ping", "id": self.id, "from": self.from, "x": x, "y": y })
         } else if self.react {
             json!({ "t": "react", "id": self.id, "from": self.from, "r": self.text })
@@ -58,9 +63,10 @@ impl ChatMsg {
         let from = clean_name(v["from"].as_str()?);
         let id: String = v["id"].as_str().unwrap_or("").chars().take(16).collect();
         match v["t"].as_str()? {
-            "chat" => Some(ChatMsg { id, from, text: clean_text(v["text"].as_str()?)?, react: false, ping: None }),
-            "react" => Some(ChatMsg { id, from, text: clean_react(v["r"].as_str()?)?, react: true, ping: None }),
-            "ping" => Some(ChatMsg { id, from, text: String::new(), react: false, ping: Some(clean_point(v)?) }),
+            "chat" => Some(ChatMsg { id, from, text: clean_text(v["text"].as_str()?)?, react: false, ping: None, draw: None }),
+            "react" => Some(ChatMsg { id, from, text: clean_react(v["r"].as_str()?)?, react: true, ping: None, draw: None }),
+            "ping" => Some(ChatMsg { id, from, text: String::new(), react: false, ping: Some(clean_point(v)?), draw: None }),
+            "draw" => Some(ChatMsg { id, from, text: String::new(), react: false, ping: None, draw: Some(clean_stroke(v)?) }),
             _ => None,
         }
     }
@@ -82,6 +88,22 @@ pub fn clean_text(s: &str) -> Option<String> {
 pub fn clean_point(v: &Value) -> Option<(f32, f32)> {
     let (x, y) = (v["x"].as_f64()? as f32, v["y"].as_f64()? as f32);
     ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some((x, y))
+}
+
+/// Traço desenhado: de 2 a 64 pontos, todos dentro do vídeo (0..1). None se inválido.
+pub const MAX_STROKE: usize = 64;
+
+pub fn clean_stroke(v: &Value) -> Option<Vec<(f32, f32)>> {
+    let a = v["pts"].as_array()?;
+    if !(2..=MAX_STROKE).contains(&a.len()) {
+        return None;
+    }
+    a.iter()
+        .map(|p| {
+            let (x, y) = (p.get(0)?.as_f64()? as f32, p.get(1)?.as_f64()? as f32);
+            ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some(((x * 1e4).round() / 1e4, (y * 1e4).round() / 1e4))
+        })
+        .collect()
 }
 
 pub fn clean_react(s: &str) -> Option<String> {
@@ -188,9 +210,19 @@ mod tests {
 
     #[test]
     fn ping_roundtrip() {
-        let m = ChatMsg { id: "v1".into(), from: "Ana".into(), text: String::new(), react: false, ping: Some((0.25, 0.75)) };
+        let m = ChatMsg { id: "v1".into(), from: "Ana".into(), text: String::new(), react: false, ping: Some((0.25, 0.75)), draw: None };
         assert_eq!(ChatMsg::from_json(&m.to_json()), Some(m));
         assert_eq!(ChatMsg::from_json(&json!({ "t": "ping", "from": "x", "x": 1.5, "y": 0.2 })), None);
+    }
+
+    #[test]
+    fn draw_roundtrip_and_limits() {
+        let m = ChatMsg { id: "v1".into(), from: "Ana".into(), text: String::new(), react: false, ping: None, draw: Some(vec![(0.1, 0.2), (0.5, 0.5), (0.9, 0.25)]) };
+        assert_eq!(ChatMsg::from_json(&m.to_json()), Some(m));
+        assert_eq!(ChatMsg::from_json(&json!({ "t": "draw", "from": "x", "pts": [[0.1, 0.1]] })), None);
+        assert_eq!(ChatMsg::from_json(&json!({ "t": "draw", "from": "x", "pts": [[0.1, 0.1], [1.2, 0.3]] })), None);
+        let many: Vec<[f32; 2]> = (0..65).map(|i| [i as f32 / 100.0, 0.5]).collect();
+        assert_eq!(ChatMsg::from_json(&json!({ "t": "draw", "from": "x", "pts": many })), None);
     }
 
     #[test]

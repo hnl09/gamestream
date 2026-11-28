@@ -213,7 +213,14 @@ pub fn apply(rel: Release) {
     std::thread::spawn(move || match install(&rel) {
         Ok(cur) => {
             // O app reaberto sabe para qual versão acabou de atualizar (ver `just_updated_to`).
-            let _ = std::process::Command::new(&cur).env("GAMESTREAM_UPDATED_TO", &rel.tag).spawn();
+            let mut cmd = std::process::Command::new(&cur);
+            cmd.env("GAMESTREAM_UPDATED_TO", &rel.tag);
+            // Iniciado na bandeja (junto com o Windows): continua só na bandeja.
+            if std::env::args().nth(1).as_deref() == Some("--tray") {
+                cmd.arg("--tray");
+            }
+            let _ = cmd.spawn();
+            crate::tray::remove();
             std::process::exit(0);
         }
         Err(e) => {
