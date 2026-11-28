@@ -16,7 +16,8 @@ TRANSMITIR
          redimensionada ou sobreposta sem interromper a transmissão. Evite
          minimizá-la.
        - "Exibir pré-visualização" abre uma janela local, sem áudio, com a
-         mesma imagem recebida pelos espectadores.
+         mesma imagem recebida pelos espectadores. Fechou no X, fica fechada
+         (inclusive nas próximas transmissões) até você pedir de novo.
 
   2. Fonte de áudio
        - Aplicativo transmitido (padrão no modo janela): somente o áudio da
@@ -89,7 +90,10 @@ ASSISTIR
      (github.com/nefarius/ViGEmBus/releases).
   6. Câmera (opcional): no card "📷 Câmera", escolha a câmera e clique em
      "Ligar minha câmera". As câmeras de todos aparecem em janelinhas no
-     canto da tela (arraste para mover, feche para esconder).
+     canto da tela. Arraste para mover (elas se encaixam sem ficar uma por
+     cima da outra) e use a roda do mouse para mudar o tamanho. Botão
+     direito > "Desativar vídeo" esconde a câmera daquela pessoa só para
+     você; para ver de novo, clique em "Mostrar" no card da câmera.
   7. Link de um clique: quem transmite clica em "🔗 Copiar link" (ao lado do
      código da sala) e manda no Discord; quem clica entra direto na sala.
   8. Se a conexão cair, o aplicativo reconecta sozinho (até 3 minutos) na
@@ -156,7 +160,8 @@ CONEXÃO PELA INTERNET
        - Todos os participantes devem estar na mesma rede virtual. Inicie o
          GameStream após conectar-se à VPN; o endereço da VPN é incluído no
          convite automaticamente.
-  4) Código de resposta (quando nada acima funcionar): se a conexão direta
+  4) Código de resposta (só sem o servidor de salas; com o código da sala
+     isso é automático): se a conexão direta
      não responder em alguns segundos, o espectador recebe um código
      GS-R-... e deve enviá-lo ao transmissor. O transmissor cola o código em
      "Liberar espectador" (ou no terminal, se estiver usando a linha de

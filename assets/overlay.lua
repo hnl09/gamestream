@@ -14,18 +14,83 @@ local en = mp.get_opt("gs-lang") == "en"
 local function L(pt, eng) return en and eng or pt end
 local has_audio = mode == "viewer"
 
--- Janelinha de câmera: só o nome de quem é, no canto (sem painel nem atalhos).
+-- Janelinha de câmera: o nome de quem é, no canto. Arrastar move (o GameStream encaixa numa grade
+-- invisível, sem sobrepor outra câmera); a roda do mouse aumenta/diminui. Sem tela cheia.
 if mode == "cam" then
     local name = (mp.get_opt("gs-name") or ""):gsub("[{}\\]", "")
     local ov = mp.create_osd_overlay("ass-events")
+    local hint_until = 0
+    local hint_timer = nil
+    local menu = nil -- { x, y, w, h } do menu do botão direito
+    local menu_timer = nil
     local function draw()
         local d = mp.get_property_native("osd-dimensions")
         if not d or not d.w or d.w <= 0 then return end
         ov.res_x, ov.res_y = d.w, d.h
-        ov.data = string.format("{\\an1\\pos(8,%d)\\fs15\\fnSegoe UI\\b1\\bord2\\shad0\\3c&H000000&\\1c&HFFFFFF&}%s", d.h - 6, name)
+        local s = string.format("{\\an1\\pos(8,%d)\\fs15\\fnSegoe UI\\b1\\bord2\\shad0\\3c&H000000&\\1c&HFFFFFF&}%s", d.h - 6, name)
+        if mp.get_time() < hint_until and not menu then
+            s = s .. string.format("\n{\\an8\\pos(%d,6)\\fs12\\fnSegoe UI\\bord2\\shad0\\3c&H000000&\\1c&HFFFFFF&}%s",
+                d.w / 2, L("arraste para mover · roda do mouse: tamanho · botão direito: opções",
+                           "drag to move · mouse wheel: size · right-click: options"))
+        end
+        if menu then
+            s = s .. string.format("\n{\\an7\\pos(%d,%d)\\bord1\\shad0\\3c&H505050&\\1c&H262626&\\1a&H00&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}",
+                menu.x, menu.y, menu.w, menu.w, menu.h, menu.h)
+            s = s .. string.format("\n{\\an4\\pos(%d,%d)\\fs16\\fnSegoe UI\\b1\\bord0\\shad0\\1c&H8C8CFF&}%s",
+                menu.x + 10, menu.y + menu.h / 2, L("🚫 Desativar vídeo", "🚫 Turn off video"))
+        end
+        ov.data = s
         ov:update()
     end
+    local function close_menu()
+        if not menu then return end
+        menu = nil
+        if menu_timer then menu_timer:kill(); menu_timer = nil end
+        mp.remove_key_binding("gs_cam_menu_click")
+        mp.remove_key_binding("gs_cam_menu_esc")
+        draw()
+    end
+    -- Botão direito: menu com "Desativar vídeo" (esconde esta câmera só para você, como no Discord).
+    -- O clique esquerdo só é capturado com o menu aberto, para não atrapalhar o arrastar.
+    mp.add_forced_key_binding("MBTN_RIGHT", "gs_cam_menu", function()
+        local d = mp.get_property_native("osd-dimensions")
+        local mx, my = mp.get_mouse_pos()
+        if not d or not d.w or d.w <= 0 then return end
+        local w, h = 170, 34
+        menu = { x = math.max(0, math.min(mx, d.w - w)), y = math.max(0, math.min(my, d.h - h)), w = w, h = h }
+        mp.add_forced_key_binding("MBTN_LEFT", "gs_cam_menu_click", function()
+            local x, y = mp.get_mouse_pos()
+            local m = menu
+            close_menu()
+            if m and x >= m.x and x <= m.x + m.w and y >= m.y and y <= m.y + m.h then
+                mp.commandv("script-message", "gs-cam-hide")
+            end
+        end)
+        mp.add_forced_key_binding("ESC", "gs_cam_menu_esc", close_menu)
+        if menu_timer then menu_timer:kill() end
+        menu_timer = mp.add_timeout(5, close_menu)
+        draw()
+    end)
+    local function show_hint()
+        hint_until = mp.get_time() + 1.6
+        draw()
+        if hint_timer then hint_timer:kill() end
+        hint_timer = mp.add_timeout(1.7, draw)
+    end
     mp.observe_property("osd-dimensions", "native", draw)
+    mp.observe_property("mouse-pos", "native", function(_, m)
+        if m and m.hover then show_hint() end
+    end)
+    local function size(d)
+        return function()
+            mp.commandv("script-message", "gs-cam-size", tostring(d))
+            show_hint()
+        end
+    end
+    mp.add_forced_key_binding("WHEEL_UP", "gs_cam_bigger", size(1))
+    mp.add_forced_key_binding("WHEEL_DOWN", "gs_cam_smaller", size(-1))
+    mp.add_forced_key_binding("MBTN_LEFT_DBL", "gs_cam_nofs", function() end)
+    mp.add_forced_key_binding("f", "gs_cam_nofs_key", function() end)
     return
 end
 

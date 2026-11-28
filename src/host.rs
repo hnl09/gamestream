@@ -224,20 +224,11 @@ async fn show_cams_locally() {
         let Some(mut rx) = CAMHUB.lock().unwrap().get(&id).map(|t| t.subscribe()) else { continue };
         let name = if id == "h" { crate::settings::nick() } else { member_name(&id) };
         tokio::spawn(async move {
-            let Ok(mut win) = crate::cam::CamWindow::open(&name) else { return };
-            let mut started = false;
+            let mut view = crate::cam::CamView::new(&name);
             loop {
                 match rx.recv().await {
-                    Ok(c) => {
-                        if !started && !c.key {
-                            continue;
-                        }
-                        started = true;
-                        if !win.write(&c.data).await || win.closed() {
-                            return; // a pessoa fechou a janelinha
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => started = false,
+                    Ok(c) => view.feed(&c.data, c.key).await,
+                    Err(broadcast::error::RecvError::Lagged(_)) => view.resync(),
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -456,6 +447,7 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
     });
     state::host(|h| h.preview_open = true);
     log(crate::i18n::t("[pré-visualização] aberta (sem áudio)."));
+    let mut write_failed = false;
     loop {
         tokio::select! {
             m = rx.recv() => match m {
@@ -468,6 +460,7 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
                         c.raw.clone()
                     };
                     if tokio::io::AsyncWriteExt::write_all(&mut stdin, &data).await.is_err() {
+                        write_failed = true;
                         break;
                     }
                 }
@@ -481,6 +474,12 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
             }
             _ = async { while preview_wanted() { tokio::time::sleep(Duration::from_millis(200)).await; } } => break,
         }
+    }
+    // A escrita falha antes de `child.wait()` perceber que o usuário fechou a janela (no X).
+    // Também conta como "não quero prévia": só reabre se a pessoa pedir pelo botão.
+    if write_failed {
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        set_preview(false);
     }
     if let Some(b) = bridge {
         b.abort();

@@ -4,6 +4,7 @@
 mod audio;
 mod avatar;
 mod cam;
+mod camgrid;
 mod control;
 mod gui;
 mod host;
@@ -320,6 +321,10 @@ fn cli() -> Result<()> {
                         host::set_camera(Some(String::new()));
                     } else if code == "cam off" {
                         host::set_camera(None);
+                    } else if let Some(n) = code.strip_prefix("cam hide ") {
+                        cam::hide(n.trim());
+                    } else if let Some(n) = code.strip_prefix("cam show ") {
+                        cam::unhide(n.trim());
                     } else if code == "stop" {
                         host::request_stop();
                     } else if code == "revoke" {
@@ -368,6 +373,10 @@ fn cli() -> Result<()> {
                         viewer::set_camera(Some(String::new()));
                     } else if cmd == "cam off" {
                         viewer::set_camera(None);
+                    } else if let Some(n) = cmd.strip_prefix("cam hide ") {
+                        cam::hide(n.trim());
+                    } else if let Some(n) = cmd.strip_prefix("cam show ") {
+                        cam::unhide(n.trim());
                     } else if let Some(c) = cmd.strip_prefix("control ") {
                         let (pad, kbm) = match c.trim() {
                             "pad" => (true, false),

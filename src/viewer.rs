@@ -246,7 +246,7 @@ fn overlay_event(v: &serde_json::Value) -> Option<OverlayEv> {
     }
 }
 
-async fn open_ipc(pipe: &str) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
+pub async fn open_ipc(pipe: &str) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
     for _ in 0..50 {
         if let Ok(c) = ClientOptions::new().open(pipe) {
             return Some(c);
@@ -558,8 +558,8 @@ async fn connect(
     // Tenta todos os endereços em paralelo, repetindo a cada 2 s pela mesma porta local. Se a conexão
     // direta não responder, exibe o código de resposta: quando o transmissor o usa ("Liberar
     // espectador"), o firewall dele passa a aceitar estas tentativas (hole punching). Com a sala, a
-    // liberação já foi pedida automaticamente e o código de resposta só aparece se demorar.
-    let reply_code = (!reply_addrs.is_empty() && !reconnecting).then(|| invite::encode_reply(&reply_addrs));
+    // liberação é pedida automaticamente pelo servidor (é a mesma coisa), então não há código.
+    let reply_code = (!reply_addrs.is_empty() && !reconnecting && !room_notified).then(|| invite::encode_reply(&reply_addrs));
     let show_reply_after = Duration::from_secs(if room_notified { 10 } else { 3 });
     let wait_total = if reconnecting {
         15
@@ -1102,14 +1102,29 @@ async fn run_session(
                 if !crate::settings::show_cams() {
                     continue;
                 }
-                let name = state::view(|s| s.roster.iter().find(|m| m.id == id).map(|m| m.name.clone())).unwrap_or_default();
                 tokio::spawn(async move {
-                    let Ok(mut win) = crate::cam::CamWindow::open(&name) else { return };
-                    log(crate::tr!("[câmera] mostrando a câmera de {name}.", "[camera] showing {name}'s camera."));
+                    // A câmera pode chegar antes da lista da sala (quem acabou de entrar): espera o nome.
+                    let mut name = String::new();
+                    for _ in 0..30 {
+                        if let Some(n) = state::view(|s| s.roster.iter().find(|m| m.id == id).map(|m| m.name.clone())) {
+                            name = n;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    if name.is_empty() {
+                        name = "?".into();
+                    }
+                    // Continua recebendo mesmo com o vídeo desativado (só para você), para poder
+                    // mostrar de novo na hora pelo card "📷 Câmera".
+                    let mut view = crate::cam::CamView::new(&name);
+                    let mut announced = false;
                     let mut buf = Vec::new();
                     while let Ok(true) = net::read_msg(&mut st, &mut buf).await {
-                        if !win.write(&buf).await || win.closed() {
-                            break; // você fechou a janelinha
+                        view.feed(&buf, crate::cam::has_sps(&buf)).await;
+                        if view.showing() && !announced {
+                            announced = true;
+                            log(crate::tr!("[câmera] mostrando a câmera de {name}.", "[camera] showing {name}'s camera."));
                         }
                     }
                 });
@@ -1220,7 +1235,7 @@ async fn own_camera(conn: quinn::Connection, device: String) {
         let mut s = conn.open_uni().await?;
         s.write_all(&[net::STREAM_CAM]).await?;
         let me = crate::settings::nick();
-        let mut mirror = crate::cam::CamWindow::open(&me).ok();
+        let mut mirror = crate::cam::CamView::new(&me);
         state::view(|v| {
             v.cam_on = true;
             v.cam_error = None;
@@ -1231,11 +1246,8 @@ async fn own_camera(conn: quinn::Connection, device: String) {
         while let Some(n) = crate::cam::read_chunk(&mut child, &mut buf).await {
             got = true;
             s.write_all(&net::frame(&buf[..n])).await?;
-            if let Some(m) = mirror.as_mut() {
-                if !m.write(&buf[..n]).await || m.closed() {
-                    mirror = None; // fechou o espelho; a câmera continua para os outros
-                }
-            }
+            // Espelho: fechar/desativar só esconde para você; a câmera continua para os outros.
+            mirror.feed(&buf[..n], crate::cam::has_sps(&buf[..n])).await;
         }
         let _ = s.finish();
         if !got {

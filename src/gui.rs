@@ -431,8 +431,6 @@ struct App {
     preview: bool,
     host_task: Option<Task>,
     live_desc: String,
-    popup: Option<String>,
-    popup_done_for: Option<String>,
     // viewer
     invite: String,
     view_password: String,
@@ -505,8 +503,6 @@ impl App {
             preview: true,
             host_task: None,
             live_desc: String::new(),
-            popup: None,
-            popup_done_for: None,
             invite: String::new(),
             view_password: String::new(),
             view_out: None,
@@ -599,7 +595,6 @@ impl App {
         };
         state::host(|h| *h = state::HostStatus::default());
         host::set_preview(self.preview);
-        self.popup_done_for = None;
         let (tx, rx) = oneshot::channel();
         let handle = self.rt.spawn(async move {
             let _ = host::run(opts, async {
@@ -961,7 +956,12 @@ impl App {
                     hint(ui, crate::i18n::t("Espectadores podem digitar o código da sala ou colar o convite completo; a conexão é liberada automaticamente."));
                     ui.add_space(4.0);
                 }
-                ui.horizontal(|ui| {
+                // O convite completo (GS-...) só é necessário sem o servidor de salas: com ele no ar,
+                // o código da sala e o link já entregam esse convite automaticamente.
+                if !st.room_online {
+                    if st.room.is_some() {
+                        hint(ui, crate::i18n::t("Sem o servidor de salas no momento: envie o convite completo."));
+                    }
                     if ui
                         .add(egui::Button::new(RichText::new(crate::i18n::t("📋  Copiar convite")).strong().color(Color32::WHITE)).fill(pal().accent))
                         .clicked()
@@ -971,19 +971,31 @@ impl App {
                             state::log(crate::i18n::t("Convite copiado."));
                         }
                     }
-                    if ui.button(crate::i18n::t("Exibir convite")).clicked() {
-                        self.popup = st.invite.clone();
-                    }
-                });
-                ui.label(crate::tr!("🔒 Código de segurança: {}", "🔒 Security code: {}", st.security_code));
+                }
+                ui.label(crate::tr!("🔒 Código de segurança: {}", "🔒 Security code: {}", st.security_code))
+                    .on_hover_text(crate::i18n::t("Os espectadores verão este mesmo código. Um código diferente indica interceptação da conexão."));
                 egui::CollapsingHeader::new(crate::i18n::t("Endereços de conexão")).show(ui, |ui| {
                     for r in &st.reach {
                         hint(ui, r);
                     }
+                    if st.room_online {
+                        if ui
+                            .small_button(crate::i18n::t("📋 Copiar convite completo"))
+                            .on_hover_text(crate::i18n::t("Só é necessário se o servidor de salas sair do ar: quem colar o convite completo entra sem ele."))
+                            .clicked()
+                        {
+                            if let Some(code) = &st.invite {
+                                ui.output_mut(|o| o.copied_text = code.clone());
+                                state::log(crate::i18n::t("Convite copiado."));
+                            }
+                        }
+                    }
                 });
             });
 
-            card(ui, crate::i18n::t("Liberar espectador"), |ui| {
+            // Com o servidor de salas no ar a liberação é automática; o código de resposta (GS-R-...)
+            // só existe para quem entrou colando o convite completo.
+            if !st.room_online { card(ui, crate::i18n::t("Liberar espectador"), |ui| {
                 hint(
                     ui,
                     crate::i18n::t("Se um espectador não conseguir conectar, ele receberá um código de resposta (GS-R-...). Cole o código aqui para liberar a conexão através do firewall do seu roteador."),
@@ -1008,7 +1020,7 @@ impl App {
                     let col = if *ok { pal().ok } else { Color32::from_rgb(255, 190, 90) };
                     ui.label(RichText::new(msg).small().color(col));
                 }
-            });
+            }); }
 
             if !st.pending.is_empty() {
                 card(ui, crate::i18n::t("Sala de espera"), |ui| {
@@ -1535,63 +1547,6 @@ impl App {
             }
         }
     }
-
-    // ---------- popup do convite ----------
-
-    fn invite_popup(&mut self, ctx: &egui::Context) {
-        let Some(code) = self.popup.clone() else { return };
-        let code_sec = state::HOST.lock().unwrap().security_code.clone();
-        // Escurece o fundo.
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("dim")))
-            .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(170));
-        let mut close = false;
-        egui::Window::new("invite_popup")
-            .title_bar(false)
-            .order(egui::Order::Foreground)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .fixed_size([460.0, 0.0])
-            .frame(egui::Frame::window(&ctx.style()).inner_margin(22.0).rounding(pal().radius * 1.2))
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(crate::i18n::t("Transmissão iniciada")).size(22.0).strong());
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(crate::i18n::t("✅ Convite copiado para a área de transferência")).color(pal().ok).strong());
-                    ui.label(crate::i18n::t("Compartilhe o convite (Ctrl+V) e envie a senha por um canal separado."));
-                });
-                ui.add_space(8.0);
-                egui::Frame::none()
-                    .fill(pal().input)
-                    .rounding(pal().radius * 0.8)
-                    .inner_margin(10.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(&code).monospace().small().color(pal().muted)).wrap(),
-                        );
-                    });
-                ui.add_space(6.0);
-                ui.label(crate::tr!("🔒 Código de segurança: {code_sec}", "🔒 Security code: {code_sec}"));
-                hint(ui, crate::i18n::t("Os espectadores verão este mesmo código. Um código diferente indica interceptação da conexão."));
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::t("📋 Copiar novamente")).clicked() {
-                        ui.output_mut(|o| o.copied_text = code.clone());
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(RichText::new("   OK   ").strong().color(Color32::WHITE)).fill(pal().accent))
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                    });
-                });
-            });
-        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {
-            self.popup = None;
-        }
-    }
 }
 
 impl App {
@@ -1721,7 +1676,19 @@ impl App {
             if ui.checkbox(&mut show, crate::i18n::t("Mostrar as câmeras dos outros")).changed() {
                 crate::settings::set_show_cams(show);
             }
-            hint(ui, crate::i18n::t("As câmeras aparecem em janelinhas no canto da tela (arraste para mover; feche para esconder). Cada câmera usa ~0,35 Mbps. Desligada por padrão."));
+            let hidden = crate::cam::hidden_list();
+            if !hidden.is_empty() {
+                ui.label(RichText::new(crate::i18n::t("Vídeos desativados (só para você):")).small().color(pal().muted));
+                for name in hidden {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("🚫 {name}"));
+                        if ui.small_button(crate::i18n::t("Mostrar")).clicked() {
+                            crate::cam::unhide(&name);
+                        }
+                    });
+                }
+            }
+            hint(ui, crate::i18n::t("As câmeras aparecem em janelinhas no canto da tela: arraste para mover (elas se encaixam sem ficar uma por cima da outra) e use a roda do mouse para mudar o tamanho. Botão direito: \"Desativar vídeo\" esconde a câmera daquela pessoa só para você. Cada câmera usa ~0,35 Mbps. Desligada por padrão."));
         });
     }
 
@@ -1996,19 +1963,13 @@ impl eframe::App for App {
                 self.start_view();
             }
         }
+        // Fechou a pré-visualização no X: vale como escolha (não reabre nesta nem nas próximas
+        // transmissões); volta só pelo botão "Exibir pré-visualização" ou pela opção antes de iniciar.
+        if self.host_running() && self.preview && !host::preview_wanted() {
+            self.preview = false;
+        }
         self.save_prefs_if_changed();
 
-        // Abre o popup (e copia o convite) assim que a transmissão fica pronta.
-        let invite = state::HOST.lock().unwrap().invite.clone();
-        if let Some(code) = invite {
-            if self.host_running() && self.popup_done_for.as_ref() != Some(&code) {
-                ctx.output_mut(|o| o.copied_text = code.clone());
-                state::log(crate::i18n::t("Convite copiado para a área de transferência."));
-                self.popup = Some(code.clone());
-                self.popup_done_for = Some(code);
-                self.tab = Tab::Host;
-            }
-        }
 
         let host_live = self.host_running();
         let view_live = self.view_running();
@@ -2144,7 +2105,6 @@ impl eframe::App for App {
                 });
             });
 
-        self.invite_popup(ctx);
         self.profile_window(ctx);
     }
 
