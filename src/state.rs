@@ -58,6 +58,8 @@ pub struct HostStatus {
     pub replay_secs: u32,
     /// Último vídeo salvo (gravação ou replay), para "Abrir pasta".
     pub last_saved: Option<String>,
+    /// "Seguir o jogo": o que está acontecendo (para a interface).
+    pub follow: Option<String>,
     /// Versão leve (720p) rodando para quem tem conexão fraca, e o bitrate dela.
     pub low_active: bool,
     pub low_bitrate: u32,

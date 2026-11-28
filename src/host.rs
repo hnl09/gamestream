@@ -414,6 +414,78 @@ pub fn release_viewer(code: &str) -> Result<usize> {
     Ok(n)
 }
 
+/// "Seguir o jogo": transmitindo um launcher, troca sozinho para o jogo que ele abrir (e volta).
+static FOLLOW: AtomicBool = AtomicBool::new(false);
+/// Muda quando a pessoa escolhe outra fonte (o "seguir o jogo" recomeça a partir dela).
+static USER_SWITCH: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_follow(on: bool) {
+    FOLLOW.store(on, Ordering::Relaxed);
+}
+
+pub fn follow_enabled() -> bool {
+    FOLLOW.load(Ordering::Relaxed)
+}
+
+/// Acompanha o launcher transmitido e troca a fonte para o jogo (e de volta). Nunca termina.
+async fn follow_game(current_source: &Mutex<Source>, cap_tx: &watch::Sender<Capture>, gfx: bool) {
+    let mut seen_gen = u64::MAX;
+    let mut st = crate::follow::State::default();
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if !follow_enabled() {
+            seen_gen = u64::MAX;
+            if st.active() {
+                st = crate::follow::State::default();
+            }
+            state::host(|h| h.follow = None);
+            continue;
+        }
+        let gen = USER_SWITCH.load(Ordering::Relaxed);
+        if gen != seen_gen {
+            seen_gen = gen;
+            let src = current_source.lock().unwrap().clone();
+            st = tokio::task::spawn_blocking(move || crate::follow::State::new(&src)).await.unwrap_or_default();
+        }
+        if !st.active() {
+            state::host(|h| h.follow = None);
+            continue;
+        }
+        let (action, st2) = tokio::task::spawn_blocking(move || {
+            let a = st.step();
+            (a, st)
+        })
+        .await
+        .unwrap_or((crate::follow::Action::None, crate::follow::State::default()));
+        st = st2;
+        match action {
+            crate::follow::Action::None => {}
+            crate::follow::Action::Note(m) => log(m),
+            crate::follow::Action::Switch(src, msg) => match capture_for(&src, gfx) {
+                Ok(c) => {
+                    log(msg);
+                    *current_source.lock().unwrap() = src;
+                    let _ = cap_tx.send(c);
+                }
+                Err(e) => log(crate::tr!("[seguir o jogo] não deu para trocar: {e:#}", "[follow game] could not switch: {e:#}")),
+            },
+        }
+        let cur = current_source.lock().unwrap().clone();
+        let text = match (&cur, st.launcher_title()) {
+            (Source::Window { title, .. }, Some(l)) if title != l => Some(crate::tr!(
+                "🎮 Seguindo o jogo: transmitindo \"{title}\" (volta para \"{l}\" quando o jogo fechar)",
+                "🎮 Following the game: streaming \"{title}\" (back to \"{l}\" when the game closes)"
+            )),
+            (_, Some(l)) => Some(crate::tr!(
+                "🎮 Seguir o jogo: quando \"{l}\" abrir o jogo, a transmissão troca sozinha",
+                "🎮 Follow game: when \"{l}\" opens the game, the stream switches by itself"
+            )),
+            _ => None,
+        };
+        state::host(|h| h.follow = text);
+    }
+}
+
 /// O host quer ver a própria transmissão (prévia sem som). A interface liga/desliga a qualquer momento.
 static PREVIEW: AtomicBool = AtomicBool::new(true);
 
@@ -766,6 +838,15 @@ pub fn resolve_audio_sel(sel: &audio::AudioSel, source: &Source) -> (audio::Capt
     match sel {
         AudioSel::GameWindow => match source {
             Source::Window { hwnd, title } => match sources::window_pid(*hwnd) {
+                Some(pid) if follow_enabled() => {
+                    // Seguir o jogo: o som do launcher e do jogo que ele abrir (o jogo é "filho" da
+                    // mesma família de processos, e a captura inclui os filhos).
+                    let root = crate::follow::family_root(pid, &crate::procaudio::processes());
+                    (
+                        CaptureSource::ProcessOnly(root),
+                        crate::tr!("somente o áudio de \"{title}\" e do jogo que ele abrir", "only the audio of \"{title}\" and the game it opens"),
+                    )
+                }
                 Some(pid) => (CaptureSource::ProcessOnly(pid), crate::tr!("somente o áudio de \"{title}\"", "only the audio of \"{title}\"")),
                 None => except_discord(),
             },
@@ -1510,6 +1591,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     let (cap_tx, cap_rx) = watch::channel(cap.clone());
     let current_source = Mutex::new(o.source.clone());
     let tracker = track_window(&current_source, &cap_tx);
+    let follower = follow_game(&current_source, &cap_tx, gfx);
     // Troca de monitor/janela durante a transmissão: o encoder reinicia com a nova fonte e os
     // espectadores continuam conectados (retomam no próximo keyframe).
     let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<Source>();
@@ -1521,6 +1603,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                     log(crate::tr!("Fonte alterada para {}.", "Source changed to {}.", source_desc(&src)));
                     *current_source.lock().unwrap() = src;
                     let _ = cap_tx.send(c);
+                    USER_SWITCH.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => log(crate::tr!("Não foi possível trocar a fonte: {e:#}", "Could not change the source: {e:#}")),
             }
@@ -1629,6 +1712,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         _ = preview => Ok(()),
         _ = recorder => Ok(()),
         _ = tracker => Ok(()),
+        _ = follower => Ok(()),
         _ = accept => Ok(()),
         _ = stats => Ok(()),
         _ = chat_log => Ok(()),

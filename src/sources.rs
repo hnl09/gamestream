@@ -12,8 +12,8 @@ use windows::Win32::{
         Gdi::ClientToScreen,
     },
     UI::WindowsAndMessaging::{
-        EnumWindows, GetClientRect, GetWindowLongW, GetWindowTextW, IsIconic, IsWindow, IsWindowVisible,
-        GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+        EnumWindows, GetClientRect, GetWindow, GetWindowLongW, GetWindowTextW, IsIconic, IsWindow, IsWindowVisible,
+        GWL_EXSTYLE, GW_OWNER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     },
 };
 
@@ -63,6 +63,35 @@ pub struct Capture {
 /// HMONITOR da saída `idx` (mesma numeração do ddagrab).
 pub fn hmonitor_for(idx: u32) -> Option<isize> {
     monitors().into_iter().find(|m| m.idx == idx).map(|m| m.hmon).filter(|h| *h != 0)
+}
+
+/// Tamanho da área interna da janela.
+pub fn client_size(hwnd: isize) -> Option<(i32, i32)> {
+    let mut r = RECT::default();
+    unsafe { GetClientRect(HWND(hwnd as *mut c_void), &mut r).ok()? };
+    Some((r.right - r.left, r.bottom - r.top))
+}
+
+/// A janela ainda existe.
+pub fn window_alive(hwnd: isize) -> bool {
+    unsafe { IsWindow(HWND(hwnd as *mut c_void)).as_bool() }
+}
+
+/// Existe, está visível e não está minimizada (dá para capturar).
+pub fn window_shown(hwnd: isize) -> bool {
+    let h = HWND(hwnd as *mut c_void);
+    unsafe { IsWindow(h).as_bool() && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() }
+}
+
+/// Janela "normal" de aplicativo: sem dono (não é popup/diálogo) e não é overlay (transparente,
+/// em camadas ou que não recebe foco).
+pub fn is_plain_window(hwnd: isize) -> bool {
+    let h = HWND(hwnd as *mut c_void);
+    unsafe {
+        let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        let overlay = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
+        ex & overlay == 0 && GetWindow(h, GW_OWNER).map_or(true, |o| o.0.is_null())
+    }
 }
 
 /// Processo dono da janela (para capturar só o som dele).

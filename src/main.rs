@@ -6,6 +6,7 @@ mod avatar;
 mod cam;
 mod camgrid;
 mod control;
+mod follow;
 mod gui;
 mod host;
 mod i18n;
@@ -80,6 +81,9 @@ enum Cmd {
         /// Sala de espera: cada espectador novo precisa ser aprovado ("approve" no terminal)
         #[arg(long)]
         approval: bool,
+        /// Seguir o jogo: transmitindo um launcher (--window), troca para o jogo que ele abrir e volta
+        #[arg(long)]
+        follow_game: bool,
         #[arg(long)]
         password: Option<String>,
         #[arg(long, default_value = "ffmpeg")]
@@ -281,10 +285,11 @@ fn cli() -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, no_preview, approval, password, ffmpeg } => {
+        Cmd::Host { port, bitrate, auto, fps, monitor, window, encoder, no_audio, audio, mic, no_upnp, no_room, pcm, no_preview, approval, follow_game, password, ffmpeg } => {
             if no_preview {
                 host::set_preview(false);
             }
+            host::set_follow(follow_game);
             let audio_device = parse_audio(&audio, window.is_some())?;
             let source = match window {
                 Some(t) => {

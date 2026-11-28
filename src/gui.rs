@@ -438,6 +438,7 @@ struct App {
     audio_pcm: bool,
     speed: Option<std::sync::Arc<std::sync::Mutex<Option<Result<f64, String>>>>>,
     preview: bool,
+    follow_game: bool,
     host_task: Option<Task>,
     live_desc: String,
     tray_hint_shown: bool,
@@ -512,6 +513,7 @@ impl App {
             audio_pcm: false,
             speed: None,
             preview: true,
+            follow_game: true,
             host_task: None,
             live_desc: String::new(),
             tray_hint_shown: false,
@@ -608,6 +610,7 @@ impl App {
         };
         state::host(|h| *h = state::HostStatus::default());
         host::set_preview(self.preview);
+        host::set_follow(self.follow_game);
         let (tx, rx) = oneshot::channel();
         let handle = self.rt.spawn(async move {
             let _ = host::run(opts, async {
@@ -681,6 +684,8 @@ impl App {
                             }
                         });
                     hint(ui, crate::i18n::t("Captura nativa do Windows: a janela pode ser movida, redimensionada ou sobreposta sem interromper a transmissão. Evite minimizá-la."));
+                    ui.checkbox(&mut self.follow_game, crate::i18n::t("🎮 Seguir o jogo (cliente do LoL, Riot Client, Steam, Battle.net...)"))
+                        .on_hover_text(crate::i18n::t("Transmitindo o launcher, quando ele abrir o jogo a transmissão passa sozinha para a janela do jogo, e volta para o launcher quando o jogo fechar. Coloque o jogo em tela cheia sem bordas ou em janela."));
                 }
             }
             ui.add_space(4.0);
@@ -919,6 +924,20 @@ impl App {
                     let target: Vec<f32> = st.history.iter().map(|s| s.fps).collect();
                     line_chart(ui, crate::i18n::t("Taxa de saída (linha tracejada: bitrate alvo)"), "Mbps", &out, pal().ok, Some((&target, pal().muted)));
                 });
+                if let Some(f) = &st.follow {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(f).small().color(pal().accent));
+                        if ui.small_button(crate::i18n::t("Desligar")).on_hover_text(crate::i18n::t("Para de trocar sozinho entre o launcher e o jogo")).clicked() {
+                            self.follow_game = false;
+                            host::set_follow(false);
+                        }
+                    });
+                } else if self.src_kind == SrcKind::Window && !self.follow_game {
+                    if ui.small_button(crate::i18n::t("🎮 Seguir o jogo")).on_hover_text(crate::i18n::t("Quando o launcher abrir o jogo, a transmissão troca sozinha (e volta quando o jogo fechar)")).clicked() {
+                        self.follow_game = true;
+                        host::set_follow(true);
+                    }
+                }
                 if st.paused {
                     ui.label(
                         RichText::new(crate::i18n::t("⏸ Ninguém assistindo: a codificação está pausada para poupar a placa de vídeo. Volta sozinha quando alguém entrar."))
@@ -1840,6 +1859,7 @@ impl App {
             "monitor": self.monitors.get(self.sel_monitor).map(|m| m.name.clone()),
             "window": self.sel_window.as_ref().map(|(_, t)| t.clone()),
             "preview": self.preview,
+            "follow_game": self.follow_game,
             "audio": self.audio,
             "audio_sel": audio_sel,
             "audio_pcm": self.audio_pcm,
@@ -1883,6 +1903,7 @@ impl App {
         }
         self.last_src_kind = self.src_kind;
         self.preview = b("preview", self.preview);
+        self.follow_game = b("follow_game", self.follow_game);
         self.audio = b("audio", self.audio);
         let name = p["audio_sel"]["name"].as_str().unwrap_or("").to_string();
         self.audio_sel = match p["audio_sel"]["kind"].as_str() {

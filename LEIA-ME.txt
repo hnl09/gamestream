@@ -15,6 +15,10 @@ TRANSMITIR
          feita diretamente pelo Windows; a janela pode ser movida,
          redimensionada ou sobreposta sem interromper a transmissão. Evite
          minimizá-la.
+       - "Seguir o jogo" (janela específica): transmita o cliente do LoL (ou
+         outro launcher, como Riot Client, Steam ou Battle.net); quando ele
+         abrir o jogo, a transmissão passa sozinha para o jogo e volta para o
+         cliente quando a partida acabar. Use o jogo em "sem bordas".
        - "Exibir pré-visualização" abre uma janela local, sem áudio, com a
          mesma imagem recebida pelos espectadores. Fechou no X, fica fechada
          (inclusive nas próximas transmissões) até você pedir de novo.
