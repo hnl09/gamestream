@@ -46,6 +46,21 @@ impl MonitorInfo {
 pub struct WindowInfo {
     pub hwnd: isize,
     pub title: String,
+    /// Minimizada agora (aparece na lista, mas precisa ser restaurada para transmitir).
+    pub minimized: bool,
+    /// Explicação curta para a lista (ex.: "cliente do LoL"); vazia se não houver.
+    pub note: String,
+}
+
+/// Janelas conhecidas que confundem (o jogo do LoL se chama "... (TM) Client").
+fn known_note(exe: &str) -> &'static str {
+    match exe.to_ascii_lowercase().as_str() {
+        "leagueclientux.exe" => crate::i18n::t("cliente do LoL"),
+        "league of legends.exe" => crate::i18n::t("partida do LoL: só existe durante o jogo"),
+        "riotclientux.exe" | "riot client.exe" => "Riot Client",
+        "valorant-win64-shipping.exe" => crate::i18n::t("partida do Valorant"),
+        _ => "",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,9 +147,10 @@ pub fn monitors() -> Vec<MonitorInfo> {
 
 unsafe extern "system" fn enum_cb(hwnd: HWND, lp: LPARAM) -> BOOL {
     let v = &mut *(lp.0 as *mut Vec<WindowInfo>);
-    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+    if !IsWindowVisible(hwnd).as_bool() {
         return TRUE;
     }
+    let minimized = IsIconic(hwnd).as_bool();
     if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32) & WS_EX_TOOLWINDOW.0 != 0 {
         return TRUE;
     }
@@ -149,24 +165,61 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lp: LPARAM) -> BOOL {
         return TRUE;
     }
     let mut r = RECT::default();
-    if GetClientRect(hwnd, &mut r).is_err() || r.right - r.left < 200 || r.bottom - r.top < 150 {
+    // Minimizada tem área 0: entra na lista mesmo assim (é restaurada ao começar a transmitir).
+    if !minimized && (GetClientRect(hwnd, &mut r).is_err() || r.right - r.left < 200 || r.bottom - r.top < 150) {
         return TRUE;
     }
     let title = String::from_utf16_lossy(&buf[..n as usize]);
-    if title == "GameStream" || title == "Program Manager" {
+    // O próprio GameStream (janela, pré-visualização, câmeras): transmitir isso faria efeito espelho.
+    if title == "GameStream" || title == "Program Manager" || title.starts_with("GameStream - ") || title.starts_with("📷 ") {
         return TRUE;
     }
-    v.push(WindowInfo { hwnd: hwnd.0 as isize, title });
+    v.push(WindowInfo { hwnd: hwnd.0 as isize, title, minimized, note: String::new() });
     TRUE
 }
 
-/// Janelas visíveis (jogos, apps) que podem ser transmitidas.
-pub fn windows() -> Vec<WindowInfo> {
+fn enum_all() -> Vec<WindowInfo> {
     let mut v: Vec<WindowInfo> = Vec::new();
     unsafe {
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut v as *mut Vec<WindowInfo> as isize));
     }
     v
+}
+
+/// Janelas visíveis e não minimizadas (jogos, apps) que podem ser capturadas agora.
+pub fn windows() -> Vec<WindowInfo> {
+    enum_all().into_iter().filter(|w| !w.minimized).collect()
+}
+
+/// Janelas para a lista da interface: inclui as minimizadas e explica as que confundem.
+pub fn windows_for_picker() -> Vec<WindowInfo> {
+    let procs = crate::procaudio::processes();
+    let exe: std::collections::HashMap<u32, String> = procs.into_iter().map(|p| (p.pid, p.exe)).collect();
+    enum_all()
+        .into_iter()
+        .map(|mut w| {
+            let mut notes: Vec<&str> = Vec::new();
+            if let Some(e) = window_pid(w.hwnd).and_then(|p| exe.get(&p)) {
+                let k = known_note(e);
+                if !k.is_empty() {
+                    notes.push(k);
+                }
+            }
+            if w.minimized {
+                notes.push(crate::i18n::t("minimizada"));
+            }
+            w.note = notes.join(" · ");
+            w
+        })
+        .collect()
+}
+
+/// Restaura uma janela minimizada sem roubar o foco (para poder transmiti-la).
+pub fn restore_no_activate(hwnd: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+    unsafe {
+        let _ = ShowWindow(HWND(hwnd as *mut c_void), SW_SHOWNOACTIVATE);
+    }
 }
 
 pub fn resolve(src: &Source) -> Result<Capture> {

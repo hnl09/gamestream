@@ -109,6 +109,42 @@ impl State {
         let Some((l_hwnd, l_title, l_exe)) = self.launcher.clone() else { return Action::None };
         let procs = crate::procaudio::processes();
         match self.game {
+            // A janela transmitida fechou (ex.: escolheram a janela da partida e ela acabou): vai para
+            // a maior janela da mesma família (o cliente) e continua seguindo o jogo a partir dela.
+            None if !sources::window_alive(l_hwnd) => {
+                let family = descendants(self.root, &procs);
+                let next = sources::windows()
+                    .into_iter()
+                    .filter(|w| sources::window_pid(w.hwnd).is_some_and(|p| family.contains(&p)) && sources::is_plain_window(w.hwnd))
+                    .max_by_key(|w| sources::client_size(w.hwnd).map(|(a, b)| a * b).unwrap_or(0));
+                match next {
+                    Some(w) => {
+                        let src = sources::Source::Window { hwnd: w.hwnd, title: w.title.clone() };
+                        let msg = crate::tr!(
+                            "[seguir o jogo] \"{l_title}\" fechou: transmitindo \"{}\" (e seguindo o próximo jogo).",
+                            "[follow game] \"{l_title}\" closed: streaming \"{}\" (and following the next game).",
+                            w.title
+                        );
+                        let root = self.root;
+                        *self = State::new(&src);
+                        if !self.active() {
+                            self.root = root;
+                        }
+                        Action::Switch(src, msg)
+                    }
+                    None => {
+                        if self.waiting_since.is_none() {
+                            self.waiting_since = Some(std::time::Instant::now());
+                            Action::Note(crate::tr!(
+                                "[seguir o jogo] \"{l_title}\" fechou; esperando uma janela do launcher aparecer...",
+                                "[follow game] \"{l_title}\" closed; waiting for a launcher window to show up..."
+                            ))
+                        } else {
+                            Action::None
+                        }
+                    }
+                }
+            }
             None => {
                 let family = descendants(self.root, &procs);
                 let best = sources::windows()
@@ -152,7 +188,7 @@ impl State {
                 // O jogo fechou: volta para o launcher (a mesma janela, ou uma nova do mesmo programa
                 // se o cliente foi fechado durante a partida e abriu de novo).
                 let back = if sources::window_shown(l_hwnd) {
-                    Some(sources::WindowInfo { hwnd: l_hwnd, title: l_title.clone() })
+                    Some(sources::WindowInfo { hwnd: l_hwnd, title: l_title.clone(), minimized: false, note: String::new() })
                 } else {
                     sources::windows()
                         .into_iter()

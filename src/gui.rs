@@ -122,6 +122,48 @@ pub fn run(join: Option<String>, hidden: bool) -> eframe::Result<()> {
     )
 }
 
+fn img_json(i: &crate::control::Image) -> serde_json::Value {
+    serde_json::json!({ "b": i.brightness, "c": i.contrast, "s": i.saturation, "g": i.gamma })
+}
+
+/// Lista de presets de imagem. `cur` = None quer dizer "igual ao transmissor" (só para quem assiste).
+/// Devolve Some(nova escolha) quando muda.
+fn image_combo(ui: &mut egui::Ui, id: &str, cur: Option<crate::control::Image>, allow_host: bool) -> Option<Option<crate::control::Image>> {
+    use crate::control::{Image, IMAGE_PRESETS};
+    let text = match cur {
+        None => crate::i18n::t("Igual ao transmissor").to_string(),
+        Some(i) => i.describe().to_string(),
+    };
+    let mut out = None;
+    egui::ComboBox::from_id_salt(id).selected_text(text).show_ui(ui, |ui| {
+        if allow_host && ui.selectable_label(cur.is_none(), crate::i18n::t("Igual ao transmissor")).clicked() {
+            out = Some(None);
+        }
+        for (pid, img) in IMAGE_PRESETS {
+            if ui.selectable_label(cur == Some(img), Image::label(pid)).clicked() {
+                out = Some(Some(img));
+            }
+        }
+        let custom = cur.is_some_and(|i| i.preset_id().is_none());
+        if ui.selectable_label(custom, Image::label("")).clicked() && !custom {
+            out = Some(Some(cur.unwrap_or_default()));
+        }
+    });
+    out
+}
+
+/// Ajuste fino (saturação, contraste, brilho, gama). Devolve o novo ajuste quando muda.
+fn image_sliders(ui: &mut egui::Ui, cur: crate::control::Image) -> Option<crate::control::Image> {
+    let mut img = cur;
+    egui::CollapsingHeader::new(crate::i18n::t("Ajuste fino")).id_salt(ui.next_auto_id()).show(ui, |ui| {
+        ui.add(egui::Slider::new(&mut img.saturation, -100..=100).text(crate::i18n::t("Saturação")));
+        ui.add(egui::Slider::new(&mut img.contrast, -100..=100).text(crate::i18n::t("Contraste")));
+        ui.add(egui::Slider::new(&mut img.brightness, -100..=100).text(crate::i18n::t("Brilho")));
+        ui.add(egui::Slider::new(&mut img.gamma, -100..=100).text(crate::i18n::t("Gama")));
+    });
+    (img != cur).then_some(img)
+}
+
 fn setup_style(ctx: &egui::Context) {
     let p = pal();
     let mut v = egui::Visuals::dark();
@@ -439,6 +481,9 @@ struct App {
     speed: Option<std::sync::Arc<std::sync::Mutex<Option<Result<f64, String>>>>>,
     preview: bool,
     follow_game: bool,
+    host_image: crate::control::Image,
+    view_image: Option<crate::control::Image>,
+    win_refreshed: std::time::Instant,
     host_task: Option<Task>,
     live_desc: String,
     tray_hint_shown: bool,
@@ -514,6 +559,9 @@ impl App {
             speed: None,
             preview: true,
             follow_game: true,
+            host_image: crate::control::Image::default(),
+            view_image: None,
+            win_refreshed: std::time::Instant::now(),
             host_task: None,
             live_desc: String::new(),
             tray_hint_shown: false,
@@ -556,7 +604,7 @@ impl App {
 
     fn refresh(&mut self) {
         self.monitors = sources::monitors();
-        self.windows = sources::windows();
+        self.windows = sources::windows_for_picker();
         if self.sel_monitor >= self.monitors.len() {
             self.sel_monitor = 0;
         }
@@ -580,10 +628,36 @@ impl App {
                 self.live_desc = m.map(|m| m.label()).unwrap_or(crate::i18n::t("Monitor 1").into());
                 Source::Monitor(m.map(|m| m.idx).unwrap_or(0))
             }
-            SrcKind::Window => match &self.sel_window {
-                Some((hwnd, title)) => {
+            SrcKind::Window => match self.sel_window.clone() {
+                Some((mut hwnd, title)) => {
+                    // A janela escolhida pode ter fechado (ex.: a janela da partida do LoL, que some
+                    // quando o jogo acaba): procura outra com o mesmo nome; se não houver, explica.
+                    if !sources::window_alive(hwnd) {
+                        self.windows = sources::windows_for_picker();
+                        match self.windows.iter().find(|w| w.title == title) {
+                            Some(w) => {
+                                hwnd = w.hwnd;
+                                self.sel_window = Some((hwnd, title.clone()));
+                            }
+                            None => {
+                                self.sel_window = None;
+                                state::host(|h| {
+                                    h.error = Some(crate::tr!(
+                                        "A janela \"{title}\" fechou. Escolha de novo na lista. No LoL, escolha \"League of Legends\" (cliente do LoL) e deixe \"Seguir o jogo\" ligado: a partida entra sozinha na transmissão.",
+                                        "The window \"{title}\" closed. Pick again from the list. For LoL, pick \"League of Legends\" (LoL client) and keep \"Follow the game\" on: the match joins the stream by itself."
+                                    ))
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    // Minimizada não dá para capturar: restaura sem roubar o foco.
+                    if self.windows.iter().any(|w| w.hwnd == hwnd && w.minimized) || !sources::window_shown(hwnd) {
+                        sources::restore_no_activate(hwnd);
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
                     self.live_desc = crate::tr!("Janela: {title}", "Window: {title}");
-                    Source::Window { hwnd: *hwnd, title: title.clone() }
+                    Source::Window { hwnd, title }
                 }
                 None => {
                     state::host(|h| h.error = Some(crate::i18n::t("Selecione uma janela antes de iniciar a transmissão.").into()));
@@ -611,6 +685,7 @@ impl App {
         state::host(|h| *h = state::HostStatus::default());
         host::set_preview(self.preview);
         host::set_follow(self.follow_game);
+        host::set_image(self.host_image);
         let (tx, rx) = oneshot::channel();
         let handle = self.rt.spawn(async move {
             let _ = host::run(opts, async {
@@ -675,12 +750,18 @@ impl App {
                 }
                 SrcKind::Window => {
                     let sel = self.sel_window.as_ref().map(|(_, t)| t.clone()).unwrap_or(crate::i18n::t("Selecione a janela...").into());
+                    // A lista se atualiza sozinha (janelas abrem e fecham, ex.: a partida do LoL).
+                    if self.win_refreshed.elapsed() > Duration::from_secs(2) {
+                        self.win_refreshed = std::time::Instant::now();
+                        self.windows = sources::windows_for_picker();
+                    }
                     egui::ComboBox::from_id_salt("window")
                         .width(ui.available_width())
                         .selected_text(sel)
                         .show_ui(ui, |ui| {
                             for w in &self.windows {
-                                ui.selectable_value(&mut self.sel_window, Some((w.hwnd, w.title.clone())), &w.title);
+                                let label = if w.note.is_empty() { w.title.clone() } else { format!("{}   ({})", w.title, w.note) };
+                                ui.selectable_value(&mut self.sel_window, Some((w.hwnd, w.title.clone())), label);
                             }
                         });
                     hint(ui, crate::i18n::t("Captura nativa do Windows: a janela pode ser movida, redimensionada ou sobreposta sem interromper a transmissão. Evite minimizá-la."));
@@ -689,6 +770,13 @@ impl App {
                 }
             }
             ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(crate::i18n::t("🎨 Imagem para quem assiste:"));
+                if let Some(img) = image_combo(ui, "img_setup", Some(self.host_image), false) {
+                    self.host_image = img.unwrap_or_default();
+                    host::set_image(self.host_image);
+                }
+            });
             ui.checkbox(&mut self.preview, crate::i18n::t("👁  Exibir pré-visualização da transmissão (sem áudio)"));
             hint(
                 ui,
@@ -1272,6 +1360,17 @@ impl App {
                 }
             });
             self.cam_card(ui, true, st.cam_on, st.cam_error.clone());
+            card(ui, crate::i18n::t("🎨 Imagem para quem assiste"), |ui| {
+                if let Some(img) = image_combo(ui, "img_host", Some(self.host_image), false) {
+                    self.host_image = img.unwrap_or_default();
+                    host::set_image(self.host_image);
+                }
+                if let Some(img) = image_sliders(ui, self.host_image) {
+                    self.host_image = img;
+                    host::set_image(img);
+                }
+                hint(ui, crate::i18n::t("Como o controle de imagem de uma TV: o ajuste é aplicado no player de quem assiste (na placa de vídeo dele), então não pesa na transmissão nem perde qualidade. Cada espectador pode trocar só para ele. A gravação fica sem o ajuste."));
+            });
         }
     }
 
@@ -1559,6 +1658,25 @@ impl App {
                 }
             });
             self.cam_card(ui, false, vs.cam_on, vs.cam_error.clone());
+            card(ui, crate::i18n::t("🎨 Imagem"), |ui| {
+                let host_desc = vs.host_image.describe();
+                ui.horizontal(|ui| {
+                    if let Some(img) = image_combo(ui, "img_view", self.view_image, true) {
+                        self.view_image = img;
+                        viewer::set_image_override(img);
+                    }
+                    if self.view_image.is_none() {
+                        hint(ui, &crate::tr!("(o transmissor escolheu: {host_desc})", "(the streamer chose: {host_desc})"));
+                    }
+                });
+                if let Some(cur) = self.view_image {
+                    if let Some(img) = image_sliders(ui, cur) {
+                        self.view_image = Some(img);
+                        viewer::set_image_override(Some(img));
+                    }
+                }
+                hint(ui, crate::i18n::t("Ajuste de cor só na sua tela (feito pela sua placa de vídeo, sem perder qualidade)."));
+            });
 
             card(ui, crate::i18n::t("Jogar junto (controle remoto)"), |ui| {
                 hint(ui, crate::i18n::t("Opcional: peça para jogar no PC do transmissor com o seu controle ou com teclado e mouse. Ele precisa permitir."));
@@ -1860,6 +1978,8 @@ impl App {
             "window": self.sel_window.as_ref().map(|(_, t)| t.clone()),
             "preview": self.preview,
             "follow_game": self.follow_game,
+            "image": img_json(&self.host_image),
+            "view_image": self.view_image.as_ref().map(img_json),
             "audio": self.audio,
             "audio_sel": audio_sel,
             "audio_pcm": self.audio_pcm,
@@ -1904,6 +2024,12 @@ impl App {
         self.last_src_kind = self.src_kind;
         self.preview = b("preview", self.preview);
         self.follow_game = b("follow_game", self.follow_game);
+        if p["image"].is_object() {
+            self.host_image = crate::control::Image::from_json(&p["image"]);
+            host::set_image(self.host_image);
+        }
+        self.view_image = p["view_image"].is_object().then(|| crate::control::Image::from_json(&p["view_image"]));
+        viewer::set_image_override(self.view_image);
         self.audio = b("audio", self.audio);
         let name = p["audio_sel"]["name"].as_str().unwrap_or("").to_string();
         self.audio_sel = match p["audio_sel"]["kind"].as_str() {
@@ -2219,6 +2345,15 @@ impl eframe::App for App {
                             {
                                 crate::settings::set_autostart(a);
                                 self.autostart = Some(a);
+                            }
+                            if ui
+                                .button(crate::i18n::t("📄 Abrir pasta de logs"))
+                                .on_hover_text(crate::i18n::t("Registro do que o app fez (no máximo ~10 MB). Útil para mandar quando algo der errado."))
+                                .clicked()
+                            {
+                                let _ = std::fs::create_dir_all(crate::logfile::dir());
+                                let _ = std::process::Command::new("explorer").arg(crate::logfile::dir()).spawn();
+                                ui.close_menu();
                             }
                             ui.separator();
                             ui.label(RichText::new(crate::i18n::t("Tema")).small().color(pal().muted));

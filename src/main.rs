@@ -7,6 +7,7 @@ mod cam;
 mod camgrid;
 mod control;
 mod follow;
+mod logfile;
 mod gui;
 mod host;
 mod i18n;
@@ -141,6 +142,12 @@ fn parse_points(s: &str) -> Vec<(f32, f32)> {
 }
 
 fn main() {
+    let mode = match std::env::args().nth(1).as_deref() {
+        None | Some("--tray") => "interface".to_string(),
+        Some(a) if a.starts_with("gamestream:") => "interface (link)".to_string(),
+        Some(a) => format!("terminal: {a}"),
+    };
+    logfile::session_start(&mode);
     // Provedor de criptografia único para todo o app (QUIC, HTTPS e WebSocket).
     let _ = rustls::crypto::ring::default_provider().install_default();
     unsafe {
@@ -155,6 +162,7 @@ fn main() {
         updater::cleanup_old();
         if let Err(e) = gui::run(Some(code), false) {
             eprintln!("Erro na interface: {e}");
+            logfile::write(&format!("Erro na interface: {e}"));
         }
         return;
     }
@@ -173,6 +181,7 @@ fn main() {
         }
         if let Err(e) = cli() {
             eprintln!("Erro: {e:#}");
+            logfile::write(&format!("Erro: {e:#}"));
             std::process::exit(1);
         }
     } else {
@@ -184,6 +193,7 @@ fn main() {
         updater::cleanup_old();
         if let Err(e) = gui::run(None, tray_start) {
             eprintln!("Erro na interface: {e}");
+            logfile::write(&format!("Erro na interface: {e}"));
         }
     }
 }
@@ -201,8 +211,12 @@ fn cli() -> Result<()> {
                 println!("  {}  [{}]  --monitor {}", m.label(), m.name, m.idx + 1);
             }
             println!("Janelas:");
-            for w in sources::windows() {
-                println!("  {}", w.title);
+            for w in sources::windows_for_picker() {
+                if w.note.is_empty() {
+                    println!("  {}", w.title);
+                } else {
+                    println!("  {}   ({})", w.title, w.note);
+                }
             }
             println!("Saídas de áudio:");
             for d in audio::output_devices() {
@@ -351,6 +365,11 @@ fn cli() -> Result<()> {
                         host::set_camera(None);
                     } else if code == "privacy on" || code == "privacy off" {
                         host::set_privacy(code == "privacy on");
+                    } else if let Some(id) = code.strip_prefix("image ") {
+                        match control::Image::preset(id.trim()) {
+                            Some(img) => host::set_image(img),
+                            None => state::log(format!("preset desconhecido: {id}")),
+                        }
                     } else if code == "record" {
                         host::toggle_record();
                     } else if code == "replay" {
@@ -399,7 +418,9 @@ fn cli() -> Result<()> {
                 let mut line = String::new();
                 while std::io::stdin().read_line(&mut line).is_ok_and(|n| n > 0) {
                     let cmd = line.trim().trim_start_matches('\u{feff}');
-                    if let Some(p) = cmd.strip_prefix("draw ") {
+                    if let Some(id) = cmd.strip_prefix("image ") {
+                        viewer::set_image_override(control::Image::preset(id.trim()));
+                    } else if let Some(p) = cmd.strip_prefix("draw ") {
                         viewer::send_draw(parse_points(p));
                     } else if let Some(t) = cmd.strip_prefix("chat ") {
                         viewer::send_chat(t);

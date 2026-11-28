@@ -72,6 +72,70 @@ impl ChatMsg {
     }
 }
 
+/// Ajuste de imagem (como no controle de imagem de uma TV): aplicado pelo player de quem assiste,
+/// na placa de vídeo dele. Não pesa na transmissão nem perde qualidade. Valores de -100 a 100.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Image {
+    pub brightness: i32,
+    pub contrast: i32,
+    pub saturation: i32,
+    pub gamma: i32,
+}
+
+/// Presets (id, brilho, contraste, saturação, gama).
+pub const IMAGE_PRESETS: [(&str, Image); 6] = [
+    ("normal", Image { brightness: 0, contrast: 0, saturation: 0, gamma: 0 }),
+    ("vivid", Image { brightness: 0, contrast: 8, saturation: 30, gamma: 0 }),
+    ("very_vivid", Image { brightness: 0, contrast: 12, saturation: 55, gamma: 0 }),
+    ("cinema", Image { brightness: -3, contrast: 15, saturation: -10, gamma: -8 }),
+    ("bright", Image { brightness: 8, contrast: 5, saturation: 10, gamma: 15 }),
+    ("bw", Image { brightness: 0, contrast: 12, saturation: -100, gamma: 0 }),
+];
+
+impl Image {
+    pub fn preset(id: &str) -> Option<Image> {
+        IMAGE_PRESETS.iter().find(|(p, _)| *p == id).map(|(_, i)| *i)
+    }
+
+    /// Id do preset igual a este ajuste (None = personalizado).
+    pub fn preset_id(&self) -> Option<&'static str> {
+        IMAGE_PRESETS.iter().find(|(_, i)| i == self).map(|(p, _)| *p)
+    }
+
+    pub fn label(id: &str) -> &'static str {
+        match id {
+            "normal" => crate::i18n::t("Normal"),
+            "vivid" => crate::i18n::t("Vívido"),
+            "very_vivid" => crate::i18n::t("Muito vívido"),
+            "cinema" => crate::i18n::t("Cinema"),
+            "bright" => crate::i18n::t("Claro (jogos escuros)"),
+            "bw" => crate::i18n::t("Preto e branco"),
+            _ => crate::i18n::t("Personalizado"),
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        Image::label(self.preset_id().unwrap_or(""))
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "t": "image", "b": self.brightness, "c": self.contrast, "s": self.saturation, "g": self.gamma })
+    }
+
+    pub fn from_json(v: &Value) -> Image {
+        let f = |k: &str| (v[k].as_i64().unwrap_or(0) as i32).clamp(-100, 100);
+        Image { brightness: f("b"), contrast: f("c"), saturation: f("s"), gamma: f("g") }
+    }
+
+    /// Comandos da IPC do mpv para aplicar o ajuste.
+    pub fn mpv_cmds(&self) -> Vec<String> {
+        [("brightness", self.brightness), ("contrast", self.contrast), ("saturation", self.saturation), ("gamma", self.gamma)]
+            .iter()
+            .map(|(p, v)| json!({ "command": ["set_property", p, v] }).to_string())
+            .collect()
+    }
+}
+
 /// Nome: sem quebras de linha nem caracteres de controle, até 24 caracteres.
 pub fn clean_name(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(24).collect::<String>().trim().to_string()
@@ -213,6 +277,16 @@ mod tests {
         let m = ChatMsg { id: "v1".into(), from: "Ana".into(), text: String::new(), react: false, ping: Some((0.25, 0.75)), draw: None };
         assert_eq!(ChatMsg::from_json(&m.to_json()), Some(m));
         assert_eq!(ChatMsg::from_json(&json!({ "t": "ping", "from": "x", "x": 1.5, "y": 0.2 })), None);
+    }
+
+    #[test]
+    fn image_presets_and_limits() {
+        let v = Image::preset("vivid").unwrap();
+        assert_eq!(Image::from_json(&v.to_json()), v);
+        assert_eq!(v.preset_id(), Some("vivid"));
+        assert_eq!(Image::from_json(&json!({ "s": 500, "c": -300 })), Image { saturation: 100, contrast: -100, ..Default::default() });
+        assert_eq!(Image { saturation: 7, ..Default::default() }.preset_id(), None);
+        assert_eq!(v.mpv_cmds().len(), 4);
     }
 
     #[test]

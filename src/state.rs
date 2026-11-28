@@ -157,6 +157,8 @@ pub struct ViewStatus {
     pub cam_error: Option<String>,
     /// O transmissor ligou o modo privacidade ("Volto já").
     pub privacy: bool,
+    /// Ajuste de imagem escolhido pelo transmissor.
+    pub host_image: crate::control::Image,
     /// Recebendo a versão leve (720p) por causa da sua conexão.
     pub low: bool,
 }
@@ -210,6 +212,7 @@ pub static VIEW_CTL: LazyLock<Mutex<ViewCtl>> = LazyLock::new(|| Mutex::new(View
 pub fn log(msg: impl AsRef<str>) {
     let m = msg.as_ref();
     println!("{m}");
+    crate::logfile::write(m);
     let mut l = LOG.lock().unwrap();
     l.push(m.to_string());
     if l.len() > 500 {

@@ -122,6 +122,22 @@ enum Outgoing {
     ControlReq { pad: bool, kbm: bool },
     Camera(Option<String>),
     Draw(Vec<(f32, f32)>),
+    /// Aplicar o ajuste de imagem no player (local, não vai para o transmissor).
+    ApplyImage,
+}
+
+/// Ajuste de imagem que você escolheu (None = usar o do transmissor). Vale para as próximas sessões.
+static IMAGE_OVERRIDE: std::sync::LazyLock<Mutex<Option<crate::control::Image>>> = std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Escolhe o seu ajuste de imagem (None = o mesmo do transmissor).
+pub fn set_image_override(img: Option<crate::control::Image>) {
+    *IMAGE_OVERRIDE.lock().unwrap() = img;
+    out(Outgoing::ApplyImage);
+}
+
+/// O ajuste que vale agora: o seu, ou o do transmissor.
+fn effective_image() -> crate::control::Image {
+    IMAGE_OVERRIDE.lock().unwrap().unwrap_or_else(|| state::view(|v| v.host_image))
 }
 
 static OUT: std::sync::LazyLock<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Outgoing>>>> =
@@ -787,6 +803,7 @@ async fn run_session(
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (mut last_frames, mut last_bytes, mut last_t) = (0u64, 0u64, std::time::Instant::now());
+    let mut log_tick: u64 = 0;
     let mut pending_first = Some(first);
     let mut have_video = false;
     let connected_at = std::time::Instant::now();
@@ -908,6 +925,10 @@ async fn run_session(
                                         s.privacy = false; // o transmissor reenvia se ainda estiver ligado
                                     });
                                     let _ = p.osd_tx.send(osd_privacy_cmd(false, &host));
+                                    // O seu ajuste de imagem (o do transmissor chega logo depois, se houver).
+                                    for c in effective_image().mpv_cmds() {
+                                        let _ = p.osd_tx.send(c);
+                                    }
                                     if let Some(code) = &room_code {
                                         let name = if host.is_empty() { state::view(|s| s.peer.clone()) } else { host.clone() };
                                         crate::settings::add_recent(code, &name);
@@ -916,6 +937,13 @@ async fn run_session(
                                 "ping" | "draw" => {
                                     if let Some(m) = crate::control::ChatMsg::from_json(&v) {
                                         let _ = p.osd_tx.send(osd_chat_cmd(&m));
+                                    }
+                                }
+                                "image" => {
+                                    let img = crate::control::Image::from_json(&v);
+                                    state::view(|s| s.host_image = img);
+                                    for c in effective_image().mpv_cmds() {
+                                        let _ = p.osd_tx.send(c);
                                     }
                                 }
                                 "privacy" => {
@@ -1048,6 +1076,12 @@ async fn run_session(
                     if let Some(m) = m {
                         let v = match m {
                             Outgoing::Chat(text) => serde_json::json!({ "t": "chat", "text": text }),
+                            Outgoing::ApplyImage => {
+                                for c in effective_image().mpv_cmds() {
+                                    let _ = p.osd_tx.send(c);
+                                }
+                                continue;
+                            }
                             Outgoing::Draw(pts) => {
                                 let pts: Vec<[f32; 2]> = pts.iter().map(|&(x, y)| [x, y]).collect();
                                 serde_json::json!({ "t": "draw", "pts": pts })
@@ -1115,6 +1149,19 @@ async fn run_session(
                     if connected_at.elapsed() > Duration::from_secs(5) && state::view(|s| s.host_version.is_none()) {
                         log(crate::i18n::t("O transmissor usa uma versão antiga do GameStream: chat, lista da sala e jogar junto ficam indisponíveis. Peça para ele abrir o app de novo para atualizar."));
                         state::view(|s| s.host_version = Some(String::new()));
+                    }
+                    log_tick += 1;
+                    if log_tick % 60 == 0 {
+                        let s = state::view(|v| v.stats.clone());
+                        crate::logfile::write(&format!(
+                            "[resumo] ping {} ms, {} FPS, perda {:.1}%, {:.1} Mbps (alvo {} Mbps){}",
+                            ping,
+                            ((f - last_frames) as f64 / dt).round(),
+                            s.loss,
+                            (b - last_bytes) as f64 * 8.0 / 1e6 / dt,
+                            s.target,
+                            if state::view(|v| v.low) { ", versão leve" } else { "" }
+                        ));
                     }
                     state::view(|v| {
                         v.stats.audio_db = audio_db;

@@ -290,6 +290,23 @@ pub fn send_draw(pts: Vec<(f32, f32)>) {
     }
 }
 
+/// Ajuste de imagem escolhido pelo transmissor: vale para quem assiste (cada um pode trocar só para si).
+static IMAGE: std::sync::LazyLock<Mutex<control::Image>> = std::sync::LazyLock::new(|| Mutex::new(control::Image::default()));
+
+pub fn image() -> control::Image {
+    *IMAGE.lock().unwrap()
+}
+
+pub fn set_image(img: control::Image) {
+    if std::mem::replace(&mut *IMAGE.lock().unwrap(), img) == img {
+        return;
+    }
+    if let Some(tx) = ROSTER.lock().unwrap().as_ref() {
+        let _ = tx.send(img.to_json());
+        log(crate::tr!("[imagem] ajuste para quem assiste: {}", "[image] adjustment for viewers: {}", img.describe()));
+    }
+}
+
 /// Modo privacidade: os espectadores veem "Volto já" (sem imagem nem som) até desligar.
 static PRIVACY: AtomicBool = AtomicBool::new(false);
 
@@ -537,6 +554,10 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
             }
         };
         send_members();
+        // A pré-visualização mostra o mesmo ajuste de imagem que os espectadores veem.
+        for c in image().mpv_cmds() {
+            let _ = osd_tx.send(c);
+        }
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<crate::viewer::OverlayEv>();
         let pipe = pipe.clone();
         tokio::spawn(async move {
@@ -552,6 +573,11 @@ async fn run_preview(vtx: &broadcast::Sender<VideoChunk>) -> Result<()> {
                     r = async { match roster_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => match r {
                         Ok(v) if v["t"] == "privacy" => {
                             let _ = osd_tx.send(crate::viewer::osd_privacy_cmd(v["on"] == true, ""));
+                        }
+                        Ok(v) if v["t"] == "image" => {
+                            for c in control::Image::from_json(&v).mpv_cmds() {
+                                let _ = osd_tx.send(c);
+                            }
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => send_members(),
                         Err(broadcast::error::RecvError::Closed) => roster_rx = None,
@@ -1637,6 +1663,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     let stats = async {
         let mut last = 0u64;
+        let mut tick: u64 = 0;
         // Por espectador: (bytes enviados, pacotes perdidos, pacotes enviados) na medição anterior.
         let mut prev: HashMap<SocketAddr, (u64, u64, u64)> = HashMap::new();
         loop {
@@ -1672,6 +1699,23 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                 rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 rows
             };
+            // Resumo por minuto no arquivo de log (para investigar problemas depois).
+            tick += 1;
+            if tick % 30 == 0 {
+                let (target, low, priv_) = state::host(|h| (h.bitrate, h.low_active.then_some(h.low_bitrate), h.privacy));
+                let who: Vec<String> = list
+                    .iter()
+                    .map(|v| format!("{} ping {} ms, perda {:.1}%, {:.1} Mbps{}", v.name, v.ping_ms, v.loss, v.mbps, if v.low { ", versão leve" } else { "" }))
+                    .collect();
+                crate::logfile::write(&format!(
+                    "[resumo] saída {mbps:.1} Mbps, alvo {target} Mbps{}{} | {} espectador(es){}{}",
+                    low.map(|b| format!(", versão leve {b} Mbps")).unwrap_or_default(),
+                    if priv_ { ", privacidade ligada" } else { "" },
+                    list.len(),
+                    if who.is_empty() { "" } else { ": " },
+                    who.join("; ")
+                ));
+            }
             state::host(|h| {
                 h.mbps = mbps;
                 let target = h.bitrate as f32;
@@ -2059,6 +2103,7 @@ async fn handle_viewer(
             if privacy() {
                 control::send(&mut send, &serde_json::json!({ "t": "privacy", "on": true })).await?;
             }
+            control::send(&mut send, &image().to_json()).await?;
             if granted_bits != 0 {
                 control::send(&mut send, &serde_json::json!({ "t": "control", "pad": granted_bits & CTL_PAD != 0, "kbm": granted_bits & CTL_KBM != 0 })).await?;
             }
