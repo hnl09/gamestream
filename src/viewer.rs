@@ -451,14 +451,18 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
     let mut token: Option<String> = None;
     let mut player: Option<Player> = None;
     let mut lost_since: Option<std::time::Instant> = None;
+    // O transmissor encerrou: espera até 1 minuto ele voltar (ex.: parou e começou de novo para
+    // trocar algo) antes de desistir.
+    let mut ended_since: Option<std::time::Instant> = None;
     let mut attempt = 0u32;
+    let host_name = || state::view(|v| if v.host_name.is_empty() { v.peer.clone() } else { v.host_name.clone() });
     loop {
         let osd = player.as_ref().map(|p| p.osd_tx.clone());
         let joined = connect(&o, token.as_deref(), lost_since.is_some(), osd.as_ref()).await;
         let j = match joined {
             Ok(j) => j,
             Err(e) if lost_since.is_none() || is_fatal(&e) => return Err(e),
-            Err(e) if e.downcast_ref::<HostEnded>().is_some() => {
+            Err(e) if e.downcast_ref::<HostEnded>().is_some() && ended_since.is_none() => {
                 // Encerrou enquanto tentávamos voltar.
                 let name = state::view(|v| if v.host_name.is_empty() { v.peer.clone() } else { v.host_name.clone() });
                 let msg = crate::tr!("📴 {name} encerrou a transmissão.", "📴 {name} ended the stream.");
@@ -467,15 +471,30 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
+                if ended_since.is_some_and(|t| t.elapsed() > Duration::from_secs(60)) {
+                    let name = host_name();
+                    let msg = crate::tr!("📴 {name} encerrou a transmissão.", "📴 {name} ended the stream.");
+                    log(&msg);
+                    state::view(|v| v.notice = Some(msg));
+                    return Ok(());
+                }
                 if lost_since.is_some_and(|t| t.elapsed() > Duration::from_secs(180)) {
                     bail!("{}", crate::tr!("não foi possível reconectar em 3 minutos: {e:#}", "could not reconnect within 3 minutes: {e:#}"));
                 }
                 attempt += 1;
-                let text = crate::tr!(
-                    "Conexão perdida. Reconectando (tentativa {})...",
-                    "Connection lost. Reconnecting (attempt {})...",
-                    attempt
-                );
+                let text = if ended_since.is_some() {
+                    let name = host_name();
+                    crate::tr!(
+                        "📴 {name} encerrou a transmissão. Esperando voltar (até 1 minuto)...",
+                        "📴 {name} ended the stream. Waiting for it to come back (up to 1 minute)..."
+                    )
+                } else {
+                    crate::tr!(
+                        "Conexão perdida. Reconectando (tentativa {})...",
+                        "Connection lost. Reconnecting (attempt {})...",
+                        attempt
+                    )
+                };
                 state::view(|v| v.reconnecting = Some(text.clone()));
                 if let Some(p) = &player {
                     let _ = p.osd_tx.send(osd_status_cmd(&text));
@@ -496,24 +515,36 @@ async fn run_inner(o: ViewOpts) -> Result<()> {
         if lost_since.take().is_some() {
             log(crate::i18n::t("Reconectado."));
         }
+        if ended_since.take().is_some() {
+            log(crate::i18n::t("A transmissão voltou."));
+        }
         attempt = 0;
         state::view(|v| v.reconnecting = None);
         match session(j, &o, &mut player, &mut out_rx, &mut token).await {
             End::Closed => return Ok(()),
             End::HostEnded => {
-                let name = state::view(|v| if v.host_name.is_empty() { v.peer.clone() } else { v.host_name.clone() });
-                let msg = crate::tr!("📴 {name} encerrou a transmissão.", "📴 {name} ended the stream.");
-                log(&msg);
-                state::view(|v| v.notice = Some(msg.clone()));
-                // Mostra o aviso na janela do vídeo por alguns segundos e fecha.
-                if let Some(p) = player.as_mut() {
-                    let _ = p.osd_tx.send(osd_status_cmd(&msg));
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(4)) => {}
-                        _ = p.child.wait() => {}
-                    }
+                // Espera até 1 minuto: se ele começar de novo na mesma sala, a imagem volta sozinha.
+                let name = host_name();
+                let text = crate::tr!(
+                    "📴 {name} encerrou a transmissão. Esperando voltar (até 1 minuto)...",
+                    "📴 {name} ended the stream. Waiting for it to come back (up to 1 minute)..."
+                );
+                log(&text);
+                ended_since = Some(std::time::Instant::now());
+                lost_since = Some(std::time::Instant::now());
+                token = None; // a transmissão nova não conhece o token antigo
+                state::view(|v| {
+                    v.phase = ViewPhase::Connecting;
+                    v.reconnecting = Some(text.clone());
+                    v.ctl_granted = 0;
+                    v.kbm_active = false;
+                });
+                crate::remote::stop_kbm_capture();
+                if let Some(p) = &player {
+                    let _ = p.osd_tx.send(osd_status_cmd(&text));
                 }
-                return Ok(());
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
             }
             End::Fatal(e) => return Err(e),
             End::Lost(e) => {

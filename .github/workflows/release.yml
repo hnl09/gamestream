@@ -63,6 +63,9 @@ jobs:
           $in.CopyTo($gz); $gz.Dispose(); $in.Dispose(); $o.Dispose()
           (Get-FileHash out\ffmpeg.exe.gz -Algorithm SHA256).Hash.ToLower() | Out-File -NoNewline -Encoding ascii out\ffmpeg.exe.gz.sha256
 
+          # App Android (montado e assinado no PC do desenvolvedor por android/build.ps1).
+          if (Test-Path android\GameStream.apk) { Copy-Item android\GameStream.apk out\ }
+
           Get-ChildItem out | ForEach-Object { "{0,-26} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) }
 
       - name: Publicar release

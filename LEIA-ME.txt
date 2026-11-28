@@ -61,6 +61,13 @@ TRANSMITIR
   transmita a "Janela específica" dele.
 
 ------------------------------------------------------------
+ASSISTIR PELO CELULAR (ANDROID)
+------------------------------------------------------------
+  Baixe o GameStream.apk na página de releases do GitHub, abra o arquivo no
+  celular e instale (permita "instalar apps desconhecidos" se ele pedir).
+  Digite o código da sala e toque em Assistir. Gire o celular para a tela
+  cheia; toque no vídeo para chat, reações e sair.
+
 ASSISTIR
 ------------------------------------------------------------
   1. Digite o código da sala (ou cole o convite GS-...), informe a senha e

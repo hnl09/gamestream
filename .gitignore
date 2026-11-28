@@ -5,3 +5,6 @@
 /out
 /worker/node_modules
 /worker/.wrangler
+
+# App Android (gerado por android/build.ps1)
+android/build/

@@ -265,6 +265,7 @@ const PAIRS: &[(&str, &str)] = &[
     ("Replay instantâneo", "Instant replay"),
     ("Guarda sempre os últimos 30 segundos na memória (cerca de 80 MB a 20 Mbps) para salvar uma jogada na hora.", "Always keeps the last 30 seconds in memory (about 80 MB at 20 Mbps) so you can save a play right away."),
     ("📂 Abrir pasta", "📂 Open folder"),
+    ("A transmissão voltou.", "The stream is back."),
     ("📄 Abrir pasta de logs", "📄 Open logs folder"),
     ("Registro do que o app fez (no máximo ~10 MB). Útil para mandar quando algo der errado.", "A record of what the app did (at most ~10 MB). Useful to send when something goes wrong."),
     ("Normal", "Normal"),
