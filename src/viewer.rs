@@ -446,6 +446,11 @@ enum End {
 }
 
 async fn run_inner(o: ViewOpts) -> Result<()> {
+    // Primeira vez assistindo: baixa o player de vídeo (mpv), como o FFmpeg de quem transmite.
+    if o.mpv.is_none() && !crate::updater::mpv_present() && std::env::var("GAMESTREAM_MPV_ARGS").is_err() {
+        view_phase(ViewPhase::Connecting, crate::i18n::t("Baixando o player de vídeo (só na primeira vez)..."));
+        tokio::task::spawn_blocking(crate::updater::ensure_mpv).await??;
+    }
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
     *OUT.lock().unwrap() = Some(out_tx);
     let mut token: Option<String> = None;
@@ -675,6 +680,11 @@ async fn connect(
             }
         }
         if start.elapsed() >= Duration::from_secs(wait_total) {
+            // Dá para saber por que não há caminho? Explica em vez de só "tempo esgotado".
+            let mine: Vec<std::net::IpAddr> = invite::local_addrs(0).into_iter().map(|(a, _, _)| a.ip()).collect();
+            if let Some(why) = invite::no_path(&inv.addrs, &mine) {
+                bail!("{}", why.viewer_text());
+            }
             let detail = last_err.map(|e| format!(" ({e:#})")).unwrap_or_default();
             bail!(
                 "{}", crate::tr!("tempo de conexão esgotado{detail}. Verifique se a transmissão está ativa e se há um caminho de rede \

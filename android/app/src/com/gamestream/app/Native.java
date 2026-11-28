@@ -19,6 +19,9 @@ final class Native {
     /** Próximo pacote Opus (espera até 100 ms). */
     static native int pollAudio(long h, byte[] buf);
 
+    /** Próximo quadro de câmera (H.264): meta = {0, chave, slot}. */
+    static native int pollCam(long h, byte[] buf, long[] meta);
+
     /** Próximo evento em JSON, ou null. */
     static native String pollEvent(long h);
 

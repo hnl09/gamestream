@@ -221,7 +221,8 @@ SEGURANÇA
 ------------------------------------------------------------
 ARQUIVOS
 ------------------------------------------------------------
-  - gamestream.exe, mpv.exe e vulkan-1.dll: incluídos no pacote.
+  - gamestream.exe: o pacote traz só ele.
+- mpv.exe (player de vídeo): baixado automaticamente na primeira vez que você assiste.
   - ffmpeg.exe: obtido automaticamente na primeira transmissão (necessário
     apenas para transmitir).
   - Placas de vídeo AMD, NVIDIA e Intel são suportadas; o encoder é

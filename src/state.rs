@@ -60,6 +60,13 @@ pub struct HostStatus {
     pub last_saved: Option<String>,
     /// "Seguir o jogo": o que está acontecendo (para a interface).
     pub follow: Option<String>,
+    /// Quem consegue assistir: 0 = todos (IPv4 aberto), 1 = só quem tem IPv6, 2 = só pela VPN,
+    /// 3 = só a rede local. E o endereço do roteador (para o passo a passo do UPnP).
+    pub reach_level: u8,
+    pub gateway: Option<String>,
+    pub cgnat: bool,
+    /// Espectadores que tentaram entrar e não tinham caminho (ex.: sem IPv6).
+    pub blocked_tries: u32,
     /// Versão leve (720p) rodando para quem tem conexão fraca, e o bitrate dela.
     pub low_active: bool,
     pub low_bitrate: u32,
@@ -211,7 +218,8 @@ pub static VIEW_CTL: LazyLock<Mutex<ViewCtl>> = LazyLock::new(|| Mutex::new(View
 
 pub fn log(msg: impl AsRef<str>) {
     let m = msg.as_ref();
-    println!("{m}");
+    // Sem console (ou com a saída fechada) não pode travar o app.
+    let _ = std::io::Write::write_fmt(&mut std::io::stdout(), format_args!("{m}\n"));
     crate::logfile::write(m);
     let mut l = LOG.lock().unwrap();
     l.push(m.to_string());

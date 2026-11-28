@@ -201,6 +201,27 @@ async fn stats_stream(st: quinn::RecvStream, s: Arc<Shared>) -> Result<()> {
     Ok(())
 }
 
+/// Câmera de alguém: [tamanho do id][id] e depois vídeo H.264.
+async fn cam_stream(mut st: quinn::RecvStream, s: Arc<Shared>, slot: i64) -> Result<()> {
+    let mut n = [0u8; 1];
+    st.read_exact(&mut n).await?;
+    let mut id = vec![0u8; n[0] as usize];
+    st.read_exact(&mut id).await?;
+    let id = String::from_utf8_lossy(&id).to_string();
+    s.event(json!({ "t": "cam", "slot": slot, "id": id, "on": true }));
+    let mut buf = Vec::new();
+    let mut split = proto::H264Splitter::default();
+    let r = async {
+        while proto::read_msg(&mut st, &mut buf).await? {
+            split.push(&buf, |au, key| s.push_cam(au, key, slot));
+        }
+        anyhow::Ok(())
+    }
+    .await;
+    s.event(json!({ "t": "cam", "slot": slot, "id": id, "on": false }));
+    r
+}
+
 /// Canal que o celular ainda não mostra (ex.: câmeras): lê e descarta. Largar o canal faria o
 /// transmissor achar que deu erro e derrubar a conexão inteira.
 async fn drain_stream(mut st: quinn::RecvStream) -> Result<()> {
@@ -237,8 +258,15 @@ async fn session(j: Joined, s: Arc<Shared>, token: &mut Option<String>) -> End {
                                 s2.event(json!({ "t": "welcome", "host": v["host"] }));
                             }
                             "roster" => {
-                                let names: Vec<serde_json::Value> = v["list"].as_array().map(|a| a.iter().take(64).map(|m| m["name"].clone()).collect()).unwrap_or_default();
-                                s2.event(json!({ "t": "roster", "names": names }));
+                                let list: Vec<serde_json::Value> = v["list"].as_array().map(|a| a.iter().take(64).cloned().collect()).unwrap_or_default();
+                                let names: Vec<serde_json::Value> = list.iter().map(|m| m["name"].clone()).collect();
+                                s2.event(json!({ "t": "roster", "names": names, "list": list }));
+                            }
+                            "avatar" => {
+                                // Foto de perfil (PNG em base64, pequena).
+                                if v["png"].as_str().is_some_and(|p| p.len() < 400_000) {
+                                    s2.event(v);
+                                }
                             }
                             "chat" | "react" | "privacy" | "notice" | "quality" | "image" | "ping" | "draw" => s2.event(v),
                             _ => {}
@@ -258,6 +286,13 @@ async fn session(j: Joined, s: Arc<Shared>, token: &mut Option<String>) -> End {
 
     let mut pending = Some(first);
     let mut tok_open = true;
+    // "Economizar dados" pedido antes (ou antes da reconexão): pede de novo a versão leve.
+    if s.low_req.load(Ordering::Relaxed) {
+        if let Some(tx) = s.out.lock().unwrap().clone() {
+            let _ = tx.send(json!({ "t": "quality_req", "low": true }));
+        }
+    }
+    let mut next_slot: i64 = 1;
     let end = loop {
         let mut st = match pending.take() {
             Some(st) => st,
@@ -304,8 +339,13 @@ async fn session(j: Joined, s: Arc<Shared>, token: &mut Option<String>) -> End {
             proto::STREAM_STATS => {
                 tasks.spawn(stats_stream(st, s2));
             }
+            proto::STREAM_CAM => {
+                let slot = next_slot;
+                next_slot += 1;
+                tasks.spawn(cam_stream(st, s2, slot));
+            }
             _ => {
-                // Câmeras e outros: o app do celular ainda não mostra, mas mantém o canal aberto.
+                // Outros: o app do celular não usa, mas mantém o canal aberto.
                 tasks.spawn(drain_stream(st));
             }
         }

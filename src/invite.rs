@@ -128,6 +128,79 @@ pub fn local_addrs(port: u16) -> Vec<(SocketAddr, AddrKind, String)> {
     out
 }
 
+/// Tipo de um endereço do convite (do lado de quem assiste, para entender se há caminho).
+pub fn kind_of(ip: IpAddr) -> Option<AddrKind> {
+    match ip {
+        IpAddr::V4(v4) if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() => None,
+        IpAddr::V4(v4) if v4.is_private() => Some(AddrKind::Lan),
+        IpAddr::V4(v4) if is_cgnat(v4) => Some(AddrKind::Vpn),
+        IpAddr::V4(_) => Some(AddrKind::PublicV4),
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xe000) == 0x2000 => Some(AddrKind::PublicV6),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().and_then(|v4| kind_of(IpAddr::V4(v4))),
+    }
+}
+
+/// Por que não há caminho entre quem assiste e o transmissor (se dá para saber antes de tentar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoPath {
+    /// O transmissor só aceita IPv6 e quem assiste não tem IPv6.
+    Ipv6Only,
+    /// O transmissor só aceita pela VPN (Tailscale) e quem assiste não está nela.
+    VpnOnly,
+    /// O transmissor só é acessível na rede local dele.
+    LanOnly,
+}
+
+pub fn no_path(host: &[SocketAddr], mine: &[IpAddr]) -> Option<NoPath> {
+    let hk: Vec<(IpAddr, AddrKind)> = host.iter().filter_map(|a| kind_of(a.ip()).map(|k| (a.ip().to_canonical(), k))).collect();
+    let mk: Vec<(IpAddr, AddrKind)> = mine.iter().filter_map(|ip| kind_of(*ip).map(|k| (ip.to_canonical(), k))).collect();
+    let has = |v: &[(IpAddr, AddrKind)], k: AddrKind| v.iter().any(|(_, x)| *x == k);
+    if has(&hk, AddrKind::PublicV4) {
+        return None;
+    }
+    // Mesma rede local (ex.: dois PCs na mesma casa).
+    let same_lan = hk.iter().filter(|(_, k)| *k == AddrKind::Lan).any(|(h, _)| {
+        mk.iter().filter(|(_, k)| *k == AddrKind::Lan).any(|(m, _)| match (h, m) {
+            (IpAddr::V4(a), IpAddr::V4(b)) => a.octets()[..3] == b.octets()[..3],
+            _ => false,
+        })
+    });
+    if same_lan || (has(&hk, AddrKind::Vpn) && has(&mk, AddrKind::Vpn)) || (has(&hk, AddrKind::PublicV6) && has(&mk, AddrKind::PublicV6)) {
+        return None;
+    }
+    Some(if has(&hk, AddrKind::PublicV6) {
+        NoPath::Ipv6Only
+    } else if has(&hk, AddrKind::Vpn) {
+        NoPath::VpnOnly
+    } else {
+        NoPath::LanOnly
+    })
+}
+
+impl NoPath {
+    /// Explicação para quem assiste.
+    pub fn viewer_text(self) -> String {
+        match self {
+            NoPath::Ipv6Only => crate::i18n::t("Sem caminho até o transmissor: ele só aceita conexões por IPv6, e a sua internet não tem IPv6. Para resolver: (1) quem transmite liga o UPnP no modem dele (o GameStream mostra como, no card \"Quem consegue te assistir\"); ou (2) você ativa o IPv6 no seu modem ou pede para a operadora (confira em test-ipv6.com); ou (3) vocês dois usam o Tailscale (gratuito).").into(),
+            NoPath::VpnOnly => crate::i18n::t("Sem caminho até o transmissor: ele só está acessível pela VPN (Tailscale). Entre na mesma rede do Tailscale que ele e tente de novo.").into(),
+            NoPath::LanOnly => crate::i18n::t("Sem caminho até o transmissor: ele só está acessível na rede local dele (sem IPv6 nem porta aberta). Peça para ele ligar o UPnP no modem ou usem o Tailscale.").into(),
+        }
+    }
+}
+
+/// Endereço do roteador (para abrir a página de configuração dele).
+pub fn default_gateway() -> Option<std::net::Ipv4Addr> {
+    use windows::Win32::NetworkManagement::IpHelper::{GetBestRoute, MIB_IPFORWARDROW};
+    let mut row = MIB_IPFORWARDROW::default();
+    let dest = u32::from_ne_bytes([8, 8, 8, 8]);
+    let r = unsafe { GetBestRoute(dest, 0, &mut row) };
+    if r != 0 {
+        return None;
+    }
+    let ip = std::net::Ipv4Addr::from(row.dwForwardNextHop.to_ne_bytes());
+    (!ip.is_unspecified()).then_some(ip)
+}
+
 pub struct PortMapping {
     gw: igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>,
     local: SocketAddr,
@@ -180,5 +253,36 @@ pub fn is_public_v4(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => !(v4.is_private() || is_cgnat(v4) || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()),
         IpAddr::V6(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn no_path_cases() {
+        let host_v6_only = [a("[2804:7f0:1::1]:9000"), a("192.168.15.71:9000")];
+        // Quem assiste sem IPv6 (só IPv4 da operadora e rede local): sem caminho.
+        let viewer_v4: Vec<IpAddr> = vec!["177.10.20.30".parse().unwrap(), "192.168.0.10".parse().unwrap()];
+        assert_eq!(no_path(&host_v6_only, &viewer_v4), Some(NoPath::Ipv6Only));
+        // Com IPv6: tem caminho.
+        let viewer_v6: Vec<IpAddr> = vec!["2804:14c:abcd::5".parse().unwrap()];
+        assert_eq!(no_path(&host_v6_only, &viewer_v6), None);
+        // Na mesma casa (mesma rede local): tem caminho.
+        let same_house: Vec<IpAddr> = vec!["192.168.15.20".parse().unwrap()];
+        assert_eq!(no_path(&host_v6_only, &same_house), None);
+        // Transmissor com IPv4 aberto: todos conseguem.
+        assert_eq!(no_path(&[a("189.1.2.3:9000")], &viewer_v4), None);
+        // Só VPN dos dois lados.
+        let vpn = [a("100.101.102.103:9000")];
+        assert_eq!(no_path(&vpn, &["100.64.0.9".parse().unwrap()]), None);
+        assert_eq!(no_path(&vpn, &viewer_v4), Some(NoPath::VpnOnly));
+        // Só rede local de outra casa.
+        assert_eq!(no_path(&[a("192.168.15.71:9000")], &["192.168.0.10".parse().unwrap()]), Some(NoPath::LanOnly));
     }
 }

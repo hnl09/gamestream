@@ -481,6 +481,7 @@ struct App {
     speed: Option<std::sync::Arc<std::sync::Mutex<Option<Result<f64, String>>>>>,
     preview: bool,
     follow_game: bool,
+    audio_delay: u32,
     host_image: crate::control::Image,
     view_image: Option<crate::control::Image>,
     win_refreshed: std::time::Instant,
@@ -559,6 +560,7 @@ impl App {
             speed: None,
             preview: true,
             follow_game: true,
+            audio_delay: 0,
             host_image: crate::control::Image::default(),
             view_image: None,
             win_refreshed: std::time::Instant::now(),
@@ -1142,6 +1144,41 @@ impl App {
                 hint(ui, crate::i18n::t("Atalhos durante o jogo: Ctrl+F9 = modo privacidade · Ctrl+F10 = salvar replay."));
             });
 
+            // Quem consegue assistir: avisa quando só quem tem IPv6 (ou VPN/rede local) consegue entrar.
+            if st.reach_level > 0 || st.blocked_tries > 0 {
+                card(ui, crate::i18n::t("📡 Quem consegue te assistir"), |ui| {
+                    let warn = Color32::from_rgb(255, 190, 90);
+                    let text = match st.reach_level {
+                        1 => crate::i18n::t("⚠ Só quem tem IPv6 consegue te assistir agora. Amigos sem IPv6 ficam em \"tempo de conexão esgotado\"."),
+                        2 => crate::i18n::t("⚠ Só quem está na mesma VPN (Tailscale) consegue te assistir."),
+                        3 => crate::i18n::t("⚠ Só quem está na sua rede local consegue te assistir."),
+                        _ => crate::i18n::t("Todos conseguem te assistir."),
+                    };
+                    ui.label(RichText::new(text).strong().color(warn));
+                    if st.blocked_tries > 0 {
+                        ui.label(RichText::new(crate::tr!(
+                            "{} tentativa(s) de entrar sem caminho até você (a internet da pessoa não tem IPv6).",
+                            "{} attempt(s) to join with no path to you (their internet has no IPv6).",
+                            st.blocked_tries
+                        )).color(warn));
+                    }
+                    if st.cgnat {
+                        hint(ui, crate::i18n::t("Sua operadora usa CGNAT (IPv4 compartilhado): abrir porta não resolve. Peça um IPv4 público à operadora, ou usem IPv6 ou o Tailscale."));
+                    } else {
+                        ui.label(RichText::new(crate::i18n::t("Para liberar para todos (ligar o UPnP no modem):")).strong());
+                        let gw = st.gateway.clone().unwrap_or_else(|| "192.168.0.1".into());
+                        hint(ui, &crate::tr!(
+                            "1. Abra http://{gw} no navegador e entre com o usuário e a senha da etiqueta do modem.\n2. Procure \"UPnP\" (em Rede, Avançado ou NAT) e ative.\n3. Pare e comece a transmissão de novo: o GameStream abre a porta sozinho.\nSem UPnP no modem: crie um redirecionamento da porta UDP 9000 para este PC.",
+                            "1. Open http://{gw} in the browser and sign in with the username and password on the router's label.\n2. Look for \"UPnP\" (under Network, Advanced or NAT) and turn it on.\n3. Stop and start the stream again: GameStream opens the port by itself.\nNo UPnP on the router: forward UDP port 9000 to this PC."
+                        ));
+                        if ui.button(crate::tr!("🌐 Abrir a página do modem ({gw})", "🌐 Open the router page ({gw})")).clicked() {
+                            let _ = std::process::Command::new("explorer").arg(format!("http://{gw}")).spawn();
+                        }
+                    }
+                    hint(ui, crate::i18n::t("Outras saídas: o amigo ativa o IPv6 no modem ou pede para a operadora (ele confere em test-ipv6.com), ou vocês dois usam o Tailscale (gratuito)."));
+                });
+            }
+
             card(ui, crate::i18n::t("Convite"), |ui| {
                 if let Some(room) = &st.room {
                     ui.horizontal(|ui| {
@@ -1601,6 +1638,18 @@ impl App {
             if s.audio_db.is_some_and(|db| db > -60.0) {
                 hint(ui, crate::i18n::t("Se não estiver ouvindo, confira a saída de áudio (padrão do Windows) e o volume no painel do vídeo."));
             }
+            if s.audio_db.is_some() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(crate::i18n::t("🔊 Sincronia do som")).small().color(pal().muted));
+                    if ui
+                        .add(egui::Slider::new(&mut self.audio_delay, 0..=400).suffix(" ms").step_by(10.0))
+                        .on_hover_text(crate::i18n::t("Som adiantado em relação à imagem? Atrase o som até a voz e os efeitos casarem com a imagem (vale na hora)."))
+                        .changed()
+                    {
+                        crate::audio::set_audio_delay(self.audio_delay);
+                    }
+                });
+            }
             if s.loss >= 2.0 {
                 hint(ui, crate::i18n::t("Perda de pacotes elevada: a conexão (ou o Wi-Fi) está instável. Com bitrate automático, o transmissor reduzirá a taxa."));
             }
@@ -1978,6 +2027,7 @@ impl App {
             "window": self.sel_window.as_ref().map(|(_, t)| t.clone()),
             "preview": self.preview,
             "follow_game": self.follow_game,
+            "audio_delay": self.audio_delay,
             "image": img_json(&self.host_image),
             "view_image": self.view_image.as_ref().map(img_json),
             "audio": self.audio,
@@ -2024,6 +2074,8 @@ impl App {
         self.last_src_kind = self.src_kind;
         self.preview = b("preview", self.preview);
         self.follow_game = b("follow_game", self.follow_game);
+        self.audio_delay = n("audio_delay", self.audio_delay).min(500);
+        crate::audio::set_audio_delay(self.audio_delay);
         if p["image"].is_object() {
             self.host_image = crate::control::Image::from_json(&p["image"]);
             host::set_image(self.host_image);

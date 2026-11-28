@@ -44,13 +44,18 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory dist, out | Out-Null
 
-          # Pacote principal (para todo mundo): app + player. Sem o FFmpeg.
+          # Pacote principal: só o app (o player e o FFmpeg são baixados sozinhos quando precisar).
           Copy-Item target\release\gamestream.exe dist\
-          $mpv = (Get-ChildItem deps\mpv -Recurse -Filter mpv.exe | Select-Object -First 1).DirectoryName
-          Copy-Item "$mpv\mpv.exe" dist\
-          Get-ChildItem $mpv -Filter *.dll | Copy-Item -Destination dist\
           Copy-Item LEIA-ME.txt, THIRD-PARTY.txt dist\
           Compress-Archive dist\* out\GameStream.zip
+
+          # Player de vídeo (mpv): baixado pelo app na primeira vez que alguém assiste.
+          New-Item -ItemType Directory mpvpkg | Out-Null
+          $mpv = (Get-ChildItem deps\mpv -Recurse -Filter mpv.exe | Select-Object -First 1).DirectoryName
+          Copy-Item "$mpv\mpv.exe" mpvpkg\
+          Get-ChildItem $mpv -Filter *.dll | Copy-Item -Destination mpvpkg\
+          Compress-Archive mpvpkg\* out\mpv.zip
+          (Get-FileHash out\mpv.zip -Algorithm SHA256).Hash.ToLower() | Out-File -NoNewline -Encoding ascii out\mpv.zip.sha256
 
           # Para a atualização automática.
           Copy-Item target\release\gamestream.exe out\

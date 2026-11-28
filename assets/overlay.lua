@@ -723,6 +723,10 @@ mp.add_forced_key_binding("MBTN_RIGHT", "gs_ping", function(e)
     end
 end, { complex = true })
 mp.add_forced_key_binding("KP_ENTER", "gs_chat_kp", open_chat)
+-- S/Shift+S/Ctrl+S do mpv salvam capturas (mpv-shotNNNN.jpg) na pasta do GameStream sem querer.
+for _, k in ipairs({ "s", "S", "Ctrl+s", "Alt+s" }) do
+    mp.add_forced_key_binding(k, "gs_noshot_" .. k, function() end)
+end
 for i, r in ipairs(REACTIONS) do
     mp.add_forced_key_binding(tostring(i), "gs_react_" .. i, function()
         if typing then return end

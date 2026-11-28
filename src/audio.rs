@@ -385,6 +385,18 @@ fn mixer(sources: Vec<(Queue, f32)>, tx: broadcast::Sender<Bytes>, stop: Arc<Ato
     }
 }
 
+/// Atraso extra do som de quem assiste (ms), para casar com a imagem: a imagem passa pela captura,
+/// pela compressão e é bem mais pesada, então costuma chegar um pouco depois do som.
+static AUDIO_DELAY_MS: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_audio_delay(ms: u32) {
+    AUDIO_DELAY_MS.store(ms.min(500), Ordering::Relaxed);
+}
+
+pub fn audio_delay() -> u32 {
+    AUDIO_DELAY_MS.load(Ordering::Relaxed)
+}
+
 /// Reprodutor com buffer de jitter pequeno (~40 ms) que descarta excesso para não acumular atraso.
 pub struct Player {
     queue: Arc<Mutex<VecDeque<f32>>>,
@@ -469,13 +481,27 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let per_ms = (cfg.sample_rate.0 as usize * cfg.channels as usize) / 1000;
-    let prime = per_ms * 40; // espera 40 ms de áudio antes de tocar
-    let max = per_ms * 150; // acima de 150 ms de atraso, descarta
     let mut priming = true;
+    let mut applied_delay = 0usize;
     Ok(dev.build_output_stream(
         cfg,
         move |out: &mut [T], _| {
             let mut q = q.lock().unwrap();
+            // Atraso para sincronizar com a imagem: mudou, ajusta na hora (silêncio a mais ou descarta).
+            let delay = audio_delay() as usize;
+            if delay != applied_delay {
+                if delay > applied_delay {
+                    for _ in 0..(delay - applied_delay) * per_ms {
+                        q.push_front(0.0);
+                    }
+                } else {
+                    let n = ((applied_delay - delay) * per_ms).min(q.len());
+                    q.drain(..n);
+                }
+                applied_delay = delay;
+            }
+            let prime = per_ms * (40 + delay); // espera 40 ms de áudio (mais o atraso) antes de tocar
+            let max = per_ms * (150 + delay); // acima disso, descarta (não acumula atraso)
             if q.len() > max {
                 let drop = q.len() - prime;
                 q.drain(..drop);

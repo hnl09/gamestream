@@ -230,6 +230,55 @@ pub fn apply(rel: Release) {
     });
 }
 
+/// O player de vídeo (mpv) já está na pasta do GameStream?
+pub fn mpv_present() -> bool {
+    exe_dir().map(|d| d.join("mpv.exe").exists()).unwrap_or(false)
+}
+
+/// Progresso do download do player (0..1), para a interface.
+pub static MPV_PROGRESS: std::sync::LazyLock<std::sync::Mutex<Option<f32>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Garante o player de vídeo (mpv): baixa da release desta versão na primeira vez que alguém assiste
+/// (o GameStream.zip não traz mais o mpv, assim fica um arquivo só e o download inicial é menor).
+pub fn ensure_mpv() -> Result<()> {
+    if mpv_present() {
+        return Ok(());
+    }
+    let dir = exe_dir()?;
+    log(crate::i18n::t("Baixando o player de vídeo (mpv, ~30 MB). Este download ocorre apenas uma vez."));
+    *MPV_PROGRESS.lock().unwrap() = Some(0.0);
+    let r = (|| -> Result<()> {
+        let (base, latest) = download_base();
+        let zip = download(&format!("{base}/mpv.zip"), |p| *MPV_PROGRESS.lock().unwrap() = Some(p))
+            .or_else(|_| download(&format!("{latest}/mpv.zip"), |p| *MPV_PROGRESS.lock().unwrap() = Some(p)))
+            .context(crate::i18n::t("não foi possível baixar o player de vídeo (mpv)"))?;
+        let sha = download(&format!("{base}/mpv.zip.sha256"), |_| {}).or_else(|_| download(&format!("{latest}/mpv.zip.sha256"), |_| {}));
+        if let Ok(sha) = sha {
+            let expected = String::from_utf8_lossy(&sha).split_whitespace().next().unwrap_or("").to_lowercase();
+            if expected != sha256_hex(&zip) {
+                bail!(crate::i18n::t("falha na verificação de integridade do player (SHA-256)"));
+            }
+        }
+        let tmp = dir.join("mpv.zip.part");
+        std::fs::write(&tmp, &zip).context(crate::i18n::t("sem permissão de gravação na pasta do GameStream"))?;
+        // O tar do Windows (10 e 11) descompacta .zip.
+        use std::os::windows::process::CommandExt;
+        let st = std::process::Command::new("tar")
+            .arg("-xf")
+            .arg(&tmp)
+            .arg("-C")
+            .arg(&dir)
+            .creation_flags(0x0800_0000)
+            .status();
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::ensure!(st.is_ok_and(|s| s.success()) && mpv_present(), "{}", crate::i18n::t("não foi possível descompactar o player de vídeo"));
+        log(crate::i18n::t("Player de vídeo instalado."));
+        Ok(())
+    })();
+    *MPV_PROGRESS.lock().unwrap() = None;
+    r
+}
+
 /// O `ffmpeg` funciona a partir deste caminho/comando?
 fn ffmpeg_works(cmd: &Path) -> bool {
     use std::os::windows::process::CommandExt;

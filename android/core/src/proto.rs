@@ -19,6 +19,7 @@ pub const STREAM_VIDEO: u8 = 1;
 pub const STREAM_AUDIO: u8 = 2;
 pub const STREAM_STATS: u8 = 3;
 pub const STREAM_AUDIO_OPUS: u8 = 4;
+pub const STREAM_CAM: u8 = 6;
 pub const SERVER: &str = "https://gamestream-rendezvous.gamestream.workers.dev";
 
 const ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -271,6 +272,49 @@ impl AuSplitter {
     }
 }
 
+/// Separa o vídeo H.264 das câmeras em quadros completos.
+#[derive(Default)]
+pub struct H264Splitter {
+    cur: Vec<u8>,
+    pos: usize,
+    seen_vcl: bool,
+    key: bool,
+}
+
+impl H264Splitter {
+    pub fn push(&mut self, data: &[u8], mut out: impl FnMut(Vec<u8>, bool)) {
+        self.cur.extend_from_slice(data);
+        let mut i = self.pos;
+        while i + 4 < self.cur.len() {
+            let c = &self.cur;
+            if c[i] == 0 && c[i + 1] == 0 && c[i + 2] == 1 {
+                let t = c[i + 3] & 0x1f;
+                // Começa um quadro: AUD, SPS, PPS, SEI, ou a 1ª fatia (first_mb_in_slice = 0).
+                let starts = matches!(t, 6..=9) || ((1..=5).contains(&t) && c[i + 4] & 0x80 != 0);
+                if starts && self.seen_vcl {
+                    let sc = if i > 0 && c[i - 1] == 0 { i - 1 } else { i };
+                    let rest = self.cur.split_off(sc);
+                    let au = std::mem::replace(&mut self.cur, rest);
+                    out(au, self.key);
+                    self.seen_vcl = false;
+                    self.key = false;
+                    i -= sc;
+                }
+                if (1..=5).contains(&t) {
+                    self.seen_vcl = true;
+                }
+                if t == 7 || t == 5 {
+                    self.key = true;
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        self.pos = i;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +325,19 @@ mod tests {
         assert_eq!(parse_code("gamestream://join/KX792B").as_deref(), Some("KX792B"));
         assert_eq!(parse_code("https://x.workers.dev/j/KX7-92B?a=1").as_deref(), Some("KX792B"));
         assert_eq!(parse_code("GS-abc"), None);
+    }
+
+    #[test]
+    fn splits_h264() {
+        let au1 = [&[0u8, 0, 0, 1, 0x67, 0x42][..], &[0, 0, 0, 1, 0x68, 0xce], &[0, 0, 0, 1, 0x65, 0x88, 1]].concat();
+        let au2 = vec![0u8, 0, 0, 1, 0x41, 0x9a, 2];
+        let stream = [au1.clone(), au2.clone(), vec![0, 0, 0, 1, 0x41, 0x9a, 3, 3]].concat();
+        let mut s = H264Splitter::default();
+        let mut got = Vec::new();
+        for c in stream.chunks(3) {
+            s.push(c, |a, k| got.push((a, k)));
+        }
+        assert_eq!(got, vec![(au1, true), (au2, false)]);
     }
 
     #[test]

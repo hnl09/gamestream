@@ -703,6 +703,8 @@ struct Viewer {
     granted: Arc<AtomicU8>,
     /// Recebendo a versão leve (720p30) por ter a conexão mais fraca que a dos outros.
     low: Arc<AtomicBool>,
+    /// O próprio espectador pediu a versão leve ("economizar dados").
+    low_req: Arc<AtomicBool>,
 }
 
 type Viewers = Arc<Mutex<HashMap<SocketAddr, Viewer>>>;
@@ -1291,6 +1293,10 @@ async fn bitrate_controller(start: u32, ceiling: u32, auto: bool, br_tx: watch::
                 } else if e.clean_since.is_none() {
                     e.clean_since = Some(Instant::now());
                 }
+                // Quem pediu a versão leve fica nela (não entra nas contas de subir/descer).
+                if vw.low_req.load(Ordering::Relaxed) {
+                    continue;
+                }
                 rows.push((*addr, vw.name.clone(), vw.low.load(Ordering::Relaxed), bad));
             }
         }
@@ -1424,6 +1430,12 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         // Usa o ffmpeg.exe da pasta do GameStream ou do PATH; se não houver, faz o download (uma única vez).
         o.ffmpeg = tokio::task::spawn_blocking(crate::updater::ensure_ffmpeg).await??;
     }
+    // Pré-visualização e câmeras usam o player (mpv): baixa na primeira vez, sem impedir a transmissão.
+    if !crate::updater::mpv_present() && std::env::var("GAMESTREAM_MPV_ARGS").is_err() {
+        if let Ok(Err(e)) = tokio::task::spawn_blocking(crate::updater::ensure_mpv).await {
+            log(crate::tr!("[player] {e:#} (a pré-visualização e as câmeras ficam indisponíveis)", "[player] {e:#} (preview and cameras unavailable)"));
+        }
+    }
     let gfx = has_gfxcapture(&o.ffmpeg).await;
     let cap = capture_for(&o.source, gfx)?;
     if let Source::Window { .. } = &o.source {
@@ -1500,6 +1512,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
 
     let mut addrs: Vec<(SocketAddr, invite::AddrKind, String)> = Vec::new();
     let mut mapping = None;
+    let mut cgnat = false;
     if o.upnp {
         log(crate::i18n::t("Solicitando abertura de porta ao roteador (UPnP)..."));
         match tokio::time::timeout(Duration::from_secs(8), invite::map_port(o.port)).await {
@@ -1512,6 +1525,7 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
                         crate::i18n::t("IPv4 público (porta aberta via UPnP)").into(),
                     ));
                 } else {
+                    cgnat = true;
                     log(crate::tr!("UPnP: porta aberta, porém o roteador está atrás de CGNAT da operadora (IP externo {ext}). \
                          Conexões externas por IPv4 não são possíveis; utilize IPv6 ou uma VPN (Tailscale).", "UPnP: port opened, but the router is behind the ISP's CGNAT (external IP {ext}). External IPv4 connections are not possible; use IPv6 or a VPN (Tailscale)."
                     ));
@@ -1542,6 +1556,30 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
     } else if addrs.iter().any(|(_, kind, _)| *kind == invite::AddrKind::PublicV6) {
         reach.push(crate::i18n::t("Obs.: conexões IPv6 exigem que o espectador também tenha IPv6 e que o modem permita conexões de entrada.").into());
     }
+    // Quem consegue assistir (para avisar e explicar como liberar para todos).
+    let has_kind = |k: invite::AddrKind| addrs.iter().any(|(_, kind, _)| *kind == k);
+    let reach_level: u8 = if has_kind(invite::AddrKind::PublicV4) {
+        0
+    } else if has_kind(invite::AddrKind::PublicV6) {
+        1
+    } else if has_kind(invite::AddrKind::Vpn) {
+        2
+    } else {
+        3
+    };
+    match reach_level {
+        1 => log(crate::i18n::t("Atenção: só quem tem IPv6 consegue te assistir agora (sem IPv4 aberto). Veja \"Quem consegue te assistir\" para liberar para todos.")),
+        2 => log(crate::i18n::t("Atenção: só quem está na mesma VPN (Tailscale) consegue te assistir.")),
+        3 => log(crate::i18n::t("Atenção: só quem está na sua rede local consegue te assistir.")),
+        _ => {}
+    }
+    let gateway = invite::default_gateway().map(|g| g.to_string());
+    state::host(|h| {
+        h.reach_level = reach_level;
+        h.gateway = gateway.clone();
+        h.cgnat = cgnat;
+        h.blocked_tries = 0;
+    });
     log(crate::tr!("Transmitindo na porta UDP {}. Convite:\n{invite_code}", "Streaming on UDP port {}. Invite:\n{invite_code}", o.port));
     for r in &reach {
         log(format!("  {r}"));
@@ -1743,6 +1781,26 @@ async fn run_inner(mut o: HostOpts, stop: impl Future<Output = ()>) -> Result<()
         while let Some(addrs) = punch_rx.recv().await {
             let list: Vec<String> = addrs.iter().map(|a| a.ip().to_canonical().to_string()).collect();
             log(crate::tr!("[conexão] liberando espectador ({}) por 20 segundos...", "[connection] allowing viewer ({}) for 20 seconds...", list.join(", ")));
+            // Quem tenta entrar sem caminho até você (ex.: sem IPv6 quando você só aceita IPv6).
+            let viewer_v6 = addrs.iter().any(|a| invite::kind_of(a.ip()) == Some(invite::AddrKind::PublicV6));
+            let viewer_vpn = addrs.iter().any(|a| invite::kind_of(a.ip()) == Some(invite::AddrKind::Vpn));
+            let blocked = match reach_level {
+                1 => !viewer_v6,
+                2 => !viewer_vpn,
+                3 => true,
+                _ => false,
+            };
+            if blocked {
+                let n = state::host(|h| {
+                    h.blocked_tries += 1;
+                    h.blocked_tries
+                });
+                log(crate::tr!(
+                    "⚠ Alguém tentou entrar e não conseguiu ({n}ª vez): a internet dele não tem IPv6 e você só aceita IPv6. Ligue o UPnP no modem (veja \"Quem consegue te assistir\").",
+                    "⚠ Someone tried to join and couldn't ({n} so far): their internet has no IPv6 and you only accept IPv6. Turn on UPnP in your router (see \"Who can watch you\")."
+                ));
+                crate::sounds::play(crate::sounds::Sound::Request);
+            }
             let sock = punch_sock.clone();
             tokio::spawn(async move { net::punch(&sock, &addrs).await });
         }
@@ -1938,6 +1996,7 @@ async fn handle_viewer(
     let wants = Arc::new(AtomicU8::new(0));
     let granted = Arc::new(AtomicU8::new(granted_bits));
     let low = Arc::new(AtomicBool::new(false));
+    let low_req = Arc::new(AtomicBool::new(false));
     let (perm_tx, mut perm_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
     conn.set_send_window(net::send_window_for(state::host(|h| h.bitrate)));
     viewers.lock().unwrap().insert(
@@ -1952,6 +2011,7 @@ async fn handle_viewer(
             wants: wants.clone(),
             granted: granted.clone(),
             low: low.clone(),
+            low_req: low_req.clone(),
         },
     );
     CONNS.lock().unwrap().insert(addr.to_string(), conn.clone());
@@ -2078,7 +2138,7 @@ async fn handle_viewer(
     // mudanças de permissão).
     let control_task = {
         let (chat_tx, name, wants, granted, injector) = (chat_tx.clone(), name.clone(), wants.clone(), granted.clone(), injector.clone());
-        let low = low.clone();
+        let (low, low_req) = (low.clone(), low_req.clone());
         let member_id = member_id.clone();
         async move {
             let Some((mut send, mut lines)) = ctl else {
@@ -2157,6 +2217,18 @@ async fn handle_viewer(
                                 if let (true, Some(pts)) = (pings.len() < 3, control::clean_stroke(&v)) {
                                     pings.push_back(Instant::now());
                                     let _ = chat_tx.send(ChatMsg { id: member_id.clone(), from: name.clone(), text: String::new(), react: false, ping: None, draw: Some(pts) });
+                                }
+                            }
+                            "quality_req" => {
+                                // "Economizar dados": o espectador pede a versão leve (ou volta à normal).
+                                let want = v["low"] == true;
+                                if low_req.swap(want, Ordering::Relaxed) != want {
+                                    low.store(want, Ordering::Relaxed);
+                                    log(if want {
+                                        crate::tr!("[qualidade] {name} pediu a versão leve (economizar dados).", "[quality] {name} asked for the light version (save data).")
+                                    } else {
+                                        crate::tr!("[qualidade] {name} voltou para a qualidade normal.", "[quality] {name} went back to normal quality.")
+                                    });
                                 }
                             }
                             "control_req" => {
