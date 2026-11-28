@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "gamestream"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "anyhow",
  "base64",

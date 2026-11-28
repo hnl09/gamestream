@@ -102,6 +102,8 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
     private volatile int audioRate = 0, audioCh = 2;
     private volatile boolean audioPcm;
     private String hostName = "";
+    /** Código da sala (para as salas recentes); "" se entrou por um convite sem código. */
+    private String roomCode = "";
     private boolean ended;
 
     @Override
@@ -225,6 +227,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
         immersive();
 
         Intent i = getIntent();
+        roomCode = Native.roomCode(i.getStringExtra("target"));
         h = Native.start(i.getStringExtra("target"), i.getStringExtra("password"), i.getStringExtra("nick"), getFilesDir().getAbsolutePath());
         running = true;
         setSaveData(saveData, false);
@@ -493,6 +496,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             }
             case "welcome":
                 hostName = v.optString("host");
+                Recent.add(this, roomCode, hostName);
                 addChat("Assistindo " + hostName + ". Toque na tela para chat e reações.");
                 break;
             case "audio":
@@ -529,6 +533,7 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback {
             }
             case "avatar": {
                 byte[] png = Base64.decode(v.optString("png"), Base64.DEFAULT);
+                if ("h".equals(v.optString("id"))) Recent.savePhoto(this, roomCode, png);
                 Bitmap b = BitmapFactory.decodeByteArray(png, 0, png.length);
                 if (b != null && avatars.size() < 64) {
                     avatars.put(v.optString("id"), b);

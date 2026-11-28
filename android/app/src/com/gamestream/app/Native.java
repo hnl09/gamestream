@@ -22,6 +22,9 @@ final class Native {
     /** Próximo quadro de câmera (H.264): meta = {0, chave, slot}. */
     static native int pollCam(long h, byte[] buf, long[] meta);
 
+    /** Código da sala (sem hífen) de um código, link ou convite; "" se não der para saber. */
+    static native String roomCode(String target);
+
     /** Próximo evento em JSON, ou null. */
     static native String pollEvent(long h);
 
