@@ -79,10 +79,42 @@ fn main_window() -> Option<HWND> {
     f.found.map(|h| HWND(h as _))
 }
 
+/// A janela está "na bandeja": fora da tela e sem botão na barra de tarefas.
+///
+/// Não usamos SW_HIDE: com a janela escondida o Windows nunca a redesenha, e o eframe fica
+/// esperando esse redesenho em modo "conferir sem parar" — 100% de um núcleo do processador.
+/// Fora da tela ela continua sendo redesenhada normalmente (e bem devagar, ver `is_hidden`).
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+static SAVED_RECT: std::sync::Mutex<Option<(i32, i32, i32, i32)>> = std::sync::Mutex::new(None);
+const PARK: i32 = -32000 + 200; // longe de qualquer monitor (mas não na posição de "minimizada")
+
+pub fn is_hidden() -> bool {
+    HIDDEN.load(Ordering::Relaxed)
+}
+
+fn set_toolwindow(h: HWND, on: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW};
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32;
+        let ex = if on { (ex | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0 } else { (ex & !WS_EX_TOOLWINDOW.0) | WS_EX_APPWINDOW.0 };
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex as isize);
+    }
+}
+
 /// Mostra (e traz para a frente) a janela principal.
 pub fn show_main() {
     if let Some(h) = main_window() {
         unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+            if HIDDEN.swap(false, Ordering::Relaxed) {
+                // Volta para onde estava e com botão na barra de tarefas (o estilo só vale
+                // na barra depois de esconder e mostrar de novo).
+                let _ = ShowWindow(h, SW_HIDE);
+                set_toolwindow(h, false);
+                if let Some((x, y, w, hh)) = SAVED_RECT.lock().unwrap().take() {
+                    let _ = SetWindowPos(h, None, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
             let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
             let _ = SetForegroundWindow(h);
         }
@@ -92,11 +124,26 @@ pub fn show_main() {
     }
 }
 
-/// Esconde a janela principal (o app continua na bandeja).
+/// "Esconde" a janela principal (o app continua na bandeja): tira da tela e da barra de tarefas.
 pub fn hide_main() {
     if let Some(h) = main_window() {
         unsafe {
+            use windows::Win32::Foundation::RECT;
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE};
+            if HIDDEN.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            if IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_RESTORE);
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_ok() {
+                *SAVED_RECT.lock().unwrap() = Some((r.left, r.top, r.right - r.left, r.bottom - r.top));
+            }
             let _ = ShowWindow(h, SW_HIDE);
+            set_toolwindow(h, true);
+            let _ = SetWindowPos(h, None, PARK, PARK, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
         }
     }
 }

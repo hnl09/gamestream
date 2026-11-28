@@ -2273,7 +2273,8 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(250));
+        // Na bandeja ninguém vê a janela: atualiza bem devagar (quase nada de processador).
+        ctx.request_repaint_after(Duration::from_millis(if crate::tray::is_hidden() { 2000 } else { 250 }));
         match START_HIDDEN.load(std::sync::atomic::Ordering::Relaxed) {
             2 => {
                 START_HIDDEN.store(1, std::sync::atomic::Ordering::Relaxed);
